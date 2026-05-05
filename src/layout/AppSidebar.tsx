@@ -47,6 +47,7 @@ export const navItems: NavItem[] = [
       { name: "Strategy", path: "/backtest/strategy", pro: false },
       { name: "Portfolios", path: "/backtest/portfolios", pro: false },
       { name: "Margin Calculator", path: "/backtest/margin-calculator", pro: false },
+      { name: "Bar Replay", path: "/backtest/bar-replay", pro: false },
     ],
   },
   {
@@ -62,8 +63,8 @@ export const navItems: NavItem[] = [
     icon: <BoltIcon />,
     name: "Algo Trade",
     subItems: [
-      { name: "Forward Test", path: "/algo-trade/forward-test", pro: false },
-      { name: "Backtest", path: "/algo-trade/backtest", pro: false },
+      { name: "Forward Test", path: "/forward-test", pro: false },
+      { name: "Backtest", path: "/backtest", pro: false },
     ],
   },
   {

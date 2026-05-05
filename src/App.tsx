@@ -40,6 +40,7 @@ import SLSimulatorPage from "./pages/Simulator/SLSimulator";
 import AnalysePage from "./pages/Common/Analyse";
 import OptionSimulatorPage from "./pages/Simulator/OptionSimulator";
 import MarginCalculator from "./pages/Backtest/MarginCalculator";
+import BarReplay from "./pages/Common/BarReplay";
 
 export default function App() {
   return (
@@ -53,17 +54,18 @@ export default function App() {
             <Route path="/stocks" element={<Stocks />} />
             <Route path="/backtest/strategy" element={<BacktestStrategy />} />
             <Route path="/backtest/portfolios" element={<BacktestPortfolios />} />
-            <Route path="/algo-trade/forward-test" element={<ForwardTest />} />
-            <Route path="/algo-trade/backtest" element={<AlgoBacktest />} />
-            <Route path="/algo-trade/execution/:type/:id" element={<ExecutionView />} />
+            <Route path="/forward-test" element={<ForwardTest />} />
+            <Route path="/backtest" element={<AlgoBacktest />} />
+            <Route path="/execution/:type/:id" element={<ExecutionView />} />
             <Route path="/portfolio/activation/:portfolioId/:status/:currentDatetime" element={<PortfolioActivation />} />
             <Route path="/portfolio/:portfolioId" element={<Portfolio />} />
             <Route path="/simulator/simulator" element={<SimulatorPage />} />
             <Route path="/simulator/sl-simulator" element={<SLSimulatorPage />} />
             <Route path="/analyse/:entityType/:entityId" element={<AnalysePage />} />
-            <Route path="/algo-trade/analyse/:entityType/:entityId" element={<AnalysePage />} />
             <Route path="/simulator/option-simulator" element={<OptionSimulatorPage />} />
             <Route path="/backtest/margin-calculator" element={<MarginCalculator />} />
+            <Route path="/backtest/bar-replay" element={<BarReplay />} />
+            <Route path="/replay/:entityType/:entityId" element={<BarReplay />} />
 
             {/* Others Page */}
             <Route path="/profile" element={<UserProfiles />} />

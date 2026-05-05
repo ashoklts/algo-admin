@@ -1,4 +1,4 @@
-import { useState, type ReactNode } from "react";
+import { useState, useRef, useEffect, type ReactNode } from "react";
 import PageMeta from "../../components/common/PageMeta";
 import Select, { type Option } from "../../components/form/Select";
 import { Modal } from "../../components/ui/modal";
@@ -44,7 +44,7 @@ function StatBlock({
 }
 
 function FieldLabel({ children }: { children: ReactNode }) {
-  return <label className="text-sm font-medium text-slate-600">{children}</label>;
+  return <label className="text-sm font-normal text-slate-600">{children}</label>;
 }
 
 function InfoIcon() {
@@ -112,28 +112,6 @@ function SegmentedControl<T extends string>({
   );
 }
 
-
-function SettingBox({
-  title,
-  top,
-  bottom,
-}: {
-  title: string;
-  top: ReactNode;
-  bottom?: ReactNode;
-}) {
-  return (
-    <div className="rounded-xl border border-slate-100 bg-white p-4 shadow-sm shadow-slate-100/70">
-      <div className="text-xs font-semibold uppercase tracking-wide text-slate-500">
-        {title}
-      </div>
-      <div className="mt-4 space-y-3">
-        <div>{top}</div>
-        {bottom ? <div>{bottom}</div> : null}
-      </div>
-    </div>
-  );
-}
 
 function CompactSelect({
   value,
@@ -358,6 +336,11 @@ const rangeBreakoutTrackingOptions: Option[] = [
   { value: "false", label: "Strike Price" },
 ];
 
+const rangeBreakoutModalTrackingOptions: Option[] = [
+  { value: "false", label: "Strike Price" },
+  { value: "true", label: "Underlying" },
+];
+
 const overallTgtSLTypeOptions: Option[] = [
   { value: "OverallTgtSLType.MTM", label: "Max Loss" },
   { value: "OverallTgtSLType.PremiumPercentage", label: "Total Premium %" },
@@ -421,6 +404,8 @@ type LegState = {
   rangeBreakoutTime: string;
   rangeBreakoutHighLow: string;
   rangeBreakoutTracking: string;
+  reentryTgtLazyLegName: string;
+  reentrySLLazyLegName: string;
 };
 
 function createDefaultLeg(id: number): LegState {
@@ -442,7 +427,7 @@ function createDefaultLeg(id: number): LegState {
     targetProfitEnabled: false,
     targetProfitType: "LegTgtSLType.Points",
     targetProfitValue: "",
-    stopLossEnabled: true,
+    stopLossEnabled: false,
     stopLossType: "LegTgtSLType.Points",
     stopLossValue: "",
     trailSLEnabled: false,
@@ -452,9 +437,11 @@ function createDefaultLeg(id: number): LegState {
     reentryTgtEnabled: false,
     reentryTgtAction: "ReentryType.Immediate",
     reentryTgtCount: "1",
-    reentrySLEnabled: true,
+    reentrySLEnabled: false,
     reentrySLAction: "ReentryType.Immediate",
     reentrySLCount: "1",
+    reentryTgtLazyLegName: "",
+    reentrySLLazyLegName: "",
     simpleMomentumEnabled: false,
     simpleMomentumType: "MomentumType.PointsUp",
     simpleMomentumValue: "",
@@ -593,6 +580,23 @@ function BuilderStrikeParam({
 
 // ─── Lazy Leg Modal ──────────────────────────────────────────────────────────
 
+function uniqueLazyName(existingNames: string[]): string {
+  let i = 1;
+  while (existingNames.includes(`lazy${i}`)) i++;
+  return `lazy${i}`;
+}
+
+function subtractOneSecond(time: string): string {
+  if (!time || !time.includes(":")) return "09:44:59";
+  const [hours, minutes] = time.split(":").map(Number);
+  if (Number.isNaN(hours) || Number.isNaN(minutes)) return "09:44:59";
+  const totalSeconds = Math.max(0, hours * 3600 + minutes * 60 - 1);
+  const hh = String(Math.floor(totalSeconds / 3600)).padStart(2, "0");
+  const mm = String(Math.floor((totalSeconds % 3600) / 60)).padStart(2, "0");
+  const ss = String(totalSeconds % 60).padStart(2, "0");
+  return `${hh}:${mm}:${ss}`;
+}
+
 type LazyLegForm = {
   legName: string;
   lots: string;
@@ -621,9 +625,11 @@ type LazyLegForm = {
   reentryTgtEnabled: boolean;
   reentryTgtAction: string;
   reentryTgtCount: string;
+  reentryTgtLazyLegName: string;
   reentrySLEnabled: boolean;
   reentrySLAction: string;
   reentrySLCount: string;
+  reentrySLLazyLegName: string;
   simpleMomentumEnabled: boolean;
   simpleMomentumType: string;
   simpleMomentumValue: string;
@@ -658,9 +664,11 @@ function defaultLazyLegForm(): LazyLegForm {
     reentryTgtEnabled: false,
     reentryTgtAction: "ReentryType.Immediate",
     reentryTgtCount: "1",
+    reentryTgtLazyLegName: "",
     reentrySLEnabled: false,
     reentrySLAction: "ReentryType.Immediate",
     reentrySLCount: "1",
+    reentrySLLazyLegName: "",
     simpleMomentumEnabled: false,
     simpleMomentumType: "MomentumType.PointsUp",
     simpleMomentumValue: "",
@@ -709,27 +717,140 @@ function LegSelect({
   );
 }
 
+function LazyLegReentryPicker({
+  selectedName,
+  lazyLegs,
+  enabled,
+  onSelect,
+  onCreateNew,
+}: {
+  selectedName: string;
+  lazyLegs: LazyLegForm[];
+  enabled: boolean;
+  onSelect: (name: string) => void;
+  onCreateNew: () => void;
+}) {
+  const [open, setOpen] = useState(false);
+  const ref = useRef<HTMLDivElement>(null);
+
+  useEffect(() => {
+    if (!open) return;
+    const handler = (e: MouseEvent) => {
+      if (ref.current && !ref.current.contains(e.target as Node)) setOpen(false);
+    };
+    document.addEventListener("mousedown", handler);
+    return () => document.removeEventListener("mousedown", handler);
+  }, [open]);
+
+  const label = selectedName || "Lazy Leg";
+
+  return (
+    <div ref={ref} className="relative w-max">
+      <button
+        type="button"
+        disabled={!enabled}
+        onClick={() => setOpen((v) => !v)}
+        className={`flex items-center gap-1 rounded border border-[#1284d0] bg-[#1284d0] py-1.5 pl-3 pr-2 text-sm text-white focus:outline-none ${
+          enabled ? "opacity-100 cursor-pointer" : "opacity-40 cursor-not-allowed"
+        }`}
+      >
+        <span>{label}</span>
+        <svg xmlns="http://www.w3.org/2000/svg" fill="none" viewBox="0 0 24 24"
+          stroke="currentColor" className="h-4 w-4 text-white">
+          <path strokeLinecap="round" strokeLinejoin="round" strokeWidth={2} d="M19 9l-7 7-7-7" />
+        </svg>
+      </button>
+
+      {open && (
+        <div className="absolute left-0 top-full z-50 mt-1 w-44 rounded-lg border border-slate-200 bg-white shadow-lg">
+          <div className="p-2">
+            <button
+              type="button"
+              onClick={() => { setOpen(false); onCreateNew(); }}
+              className="flex w-full items-center justify-center gap-1.5 rounded-md bg-[#465fff] px-3 py-2 text-sm font-semibold text-white hover:bg-[#3550ee]"
+            >
+              <svg xmlns="http://www.w3.org/2000/svg" fill="none" viewBox="0 0 24 24"
+                stroke="currentColor" className="h-4 w-4">
+                <path strokeLinecap="round" strokeLinejoin="round" strokeWidth={2} d="M12 4v16m8-8H4" />
+              </svg>
+              Create New
+            </button>
+          </div>
+
+          {lazyLegs.length > 0 && (
+            <>
+              <div className="flex items-center gap-2 px-3 py-1">
+                <div className="h-px flex-1 bg-slate-200" />
+                <span className="text-xs text-slate-400">OR</span>
+                <div className="h-px flex-1 bg-slate-200" />
+              </div>
+              <div className="px-2 pb-1">
+                <p className="mb-1 px-1 text-xs font-medium text-slate-500">Select from existing</p>
+                {lazyLegs
+                  .filter((ll, i, arr) => arr.findIndex((x) => x.legName === ll.legName) === i)
+                  .map((ll) => (
+                    <button
+                      key={ll.legName}
+                      type="button"
+                      onClick={() => { onSelect(ll.legName); setOpen(false); }}
+                      className="flex w-full items-center justify-between rounded px-2 py-1.5 text-sm text-slate-700 hover:bg-slate-100"
+                    >
+                      <span>{ll.legName}</span>
+                      {selectedName === ll.legName && (
+                        <svg xmlns="http://www.w3.org/2000/svg" fill="none" viewBox="0 0 24 24"
+                          stroke="currentColor" className="h-4 w-4 text-[#465fff]">
+                          <path strokeLinecap="round" strokeLinejoin="round" strokeWidth={2.5} d="M5 13l4 4L19 7" />
+                        </svg>
+                      )}
+                    </button>
+                  ))}
+              </div>
+            </>
+          )}
+        </div>
+      )}
+    </div>
+  );
+}
+
 function LazyLegModal({
   onClose,
   onConfirm,
+  existingNames = [],
+  lazyLegs = [],
+  onAddLazyLeg,
 }: {
   onClose: () => void;
   onConfirm: (form: LazyLegForm) => void;
+  existingNames?: string[];
+  lazyLegs?: LazyLegForm[];
+  onAddLazyLeg?: (form: LazyLegForm) => void;
 }) {
-  const [form, setForm] = useState<LazyLegForm>(defaultLazyLegForm());
+  const [form, setForm] = useState<LazyLegForm>(() => ({
+    ...defaultLazyLegForm(),
+    legName: uniqueLazyName(existingNames),
+  }));
+  const nameError = existingNames.includes(form.legName.trim());
   const upd = <K extends keyof LazyLegForm>(key: K, val: LazyLegForm[K]) =>
     setForm((prev) => ({ ...prev, [key]: val }));
   const tog = (key: keyof LazyLegForm) =>
     setForm((prev) => ({ ...prev, [key]: !prev[key] }));
 
-  // Nested lazy leg stack
   const [nestedFor, setNestedFor] = useState<"tgt" | "sl" | null>(null);
+
   const handleReentryChange = (which: "tgt" | "sl", value: string) => {
-    if (value === "ReentryType.NextLeg") {
+    upd(which === "tgt" ? "reentryTgtAction" : "reentrySLAction", value as LazyLegForm["reentryTgtAction"]);
+    if (value !== "ReentryType.NextLeg") {
+      upd(which === "tgt" ? "reentryTgtLazyLegName" : "reentrySLLazyLegName", "");
+    } else if (lazyLegs.length === 0) {
       setNestedFor(which);
-    } else {
-      upd(which === "tgt" ? "reentryTgtAction" : "reentrySLAction", value as LazyLegForm["reentryTgtAction"]);
     }
+  };
+
+  const handleNestedConfirm = (newForm: LazyLegForm) => {
+    onAddLazyLeg?.(newForm);
+    upd(nestedFor === "tgt" ? "reentryTgtLazyLegName" : "reentrySLLazyLegName", newForm.legName);
+    setNestedFor(null);
   };
 
   const modalInput = (val: string, key: keyof LazyLegForm, enabled: boolean) => (
@@ -759,12 +880,21 @@ function LazyLegModal({
 
           {/* Leg Name */}
           <div className="flex items-center gap-5">
-            <label className="whitespace-nowrap text-sm font-medium text-slate-600">
+            <label className="whitespace-nowrap text-sm font-normal text-slate-600">
               Enter Leg Name
             </label>
-            <input type="text" value={form.legName}
-              onChange={(e) => upd("legName", e.target.value)}
-              className="rounded border border-slate-300 px-3 py-1.5 text-sm text-slate-700 focus:outline-none focus:ring-1 focus:ring-[#465fff]/60 w-44" />
+            <div className="flex flex-col gap-1">
+              <input type="text" value={form.legName}
+                onChange={(e) => upd("legName", e.target.value)}
+                className={`rounded border px-3 py-1.5 text-sm text-slate-700 focus:outline-none focus:ring-1 w-44 ${
+                  nameError
+                    ? "border-red-400 focus:ring-red-400/60"
+                    : "border-slate-300 focus:ring-[#465fff]/60"
+                }`} />
+              {nameError && (
+                <span className="text-xs text-red-500">Name already exists</span>
+              )}
+            </div>
           </div>
 
           {/* ── Inner card ── */}
@@ -774,33 +904,33 @@ function LazyLegModal({
             <div className="overflow-x-auto">
               <div className="flex min-w-max items-end gap-6">
                 <div className="flex flex-col gap-1.5">
-                  <label className="text-xs font-medium text-[#465fff]">Lots</label>
+                  <label className="text-xs font-normal text-[#465fff]">Lots</label>
                   <input type="number" min="1" value={form.lots}
                     onChange={(e) => upd("lots", e.target.value)}
                     className="w-16 rounded border border-slate-300 px-2 py-1.5 text-sm text-slate-700 focus:outline-none" />
                 </div>
 
                 <div className="flex flex-col gap-1.5">
-                  <label className="text-xs font-medium text-slate-500">Position</label>
+                  <label className="text-xs font-normal text-slate-500">Position</label>
                   <NativeSelect value={form.position} options={positionOptions}
                     onChange={(v) => upd("position", v)} />
                 </div>
 
                 <div className="flex flex-col gap-1.5">
-                  <label className="text-xs font-medium text-slate-500">Option Type</label>
+                  <label className="text-xs font-normal text-slate-500">Option Type</label>
                   <NativeSelect value={form.optionType} options={optionTypeOptions}
                     onChange={(v) => upd("optionType", v)} />
                 </div>
 
                 <div className="flex flex-col gap-1.5">
-                  <label className="text-xs font-medium text-slate-500">Expiry</label>
+                  <label className="text-xs font-normal text-slate-500">Expiry</label>
                   <NativeSelect value={form.expiry} options={expiryOptions}
                     onChange={(v) => upd("expiry", v)} />
                 </div>
 
                 <div className="flex flex-col gap-1.5">
                   <div className="flex items-center gap-1">
-                    <label className="text-xs font-medium text-slate-500">Select Strike Criteria</label>
+                    <label className="text-xs font-normal text-slate-500">Select Strike Criteria</label>
                     <InfoIcon />
                   </div>
                   <NativeSelect value={form.strikeCriteria} options={strikeCriteriaOptions}
@@ -829,7 +959,7 @@ function LazyLegModal({
               {/* Target Profit */}
               <div className="flex flex-col gap-2">
                 <div className="flex items-center gap-2">
-                  <label className="text-sm font-medium text-slate-600">Target Profit</label>
+                  <label className="text-sm font-normal text-slate-600">Target Profit</label>
                   <ToggleSwitch enabled={form.targetProfitEnabled}
                     onToggle={() => tog("targetProfitEnabled")} />
                 </div>
@@ -844,7 +974,7 @@ function LazyLegModal({
               {/* Stop Loss */}
               <div className="flex flex-col gap-2">
                 <div className="flex items-center gap-2">
-                  <label className="text-sm font-medium text-slate-600">Stop Loss</label>
+                  <label className="text-sm font-normal text-slate-600">Stop Loss</label>
                   <ToggleSwitch enabled={form.stopLossEnabled}
                     onToggle={() => tog("stopLossEnabled")} />
                 </div>
@@ -859,7 +989,7 @@ function LazyLegModal({
               {/* Trail SL */}
               <div className="flex flex-col gap-2">
                 <div className="flex items-center gap-2">
-                  <label className="text-sm font-medium text-slate-600">Trail SL</label>
+                  <label className="text-sm font-normal text-slate-600">Trail SL</label>
                   <InfoIcon />
                   <ToggleSwitch enabled={form.trailSLEnabled}
                     onToggle={() => tog("trailSLEnabled")} />
@@ -879,7 +1009,7 @@ function LazyLegModal({
               {/* Re-entry on Tgt */}
               <div className="flex flex-col gap-2">
                 <div className="flex items-center gap-2">
-                  <label className="text-sm font-medium text-slate-600">Re-entry on Tgt</label>
+                  <label className="text-sm font-normal text-slate-600">Re-entry on Tgt</label>
                   <InfoIcon />
                   <ToggleSwitch enabled={form.reentryTgtEnabled}
                     onToggle={() => tog("reentryTgtEnabled")} />
@@ -888,15 +1018,25 @@ function LazyLegModal({
                   <LegSelect value={form.reentryTgtAction} options={legReentryActionOptions}
                     onChange={(v) => handleReentryChange("tgt", v)}
                     enabled={form.reentryTgtEnabled} className="min-w-[120px]" />
-                  <LegCountSelect value={form.reentryTgtCount}
-                    onChange={(v) => upd("reentryTgtCount", v)} enabled={form.reentryTgtEnabled} />
+                  {form.reentryTgtAction === "ReentryType.NextLeg" ? (
+                    <LazyLegReentryPicker
+                      selectedName={form.reentryTgtLazyLegName}
+                      lazyLegs={lazyLegs}
+                      enabled={form.reentryTgtEnabled}
+                      onSelect={(name) => upd("reentryTgtLazyLegName", name)}
+                      onCreateNew={() => setNestedFor("tgt")}
+                    />
+                  ) : (
+                    <LegCountSelect value={form.reentryTgtCount}
+                      onChange={(v) => upd("reentryTgtCount", v)} enabled={form.reentryTgtEnabled} />
+                  )}
                 </div>
               </div>
 
               {/* Re-entry on SL */}
               <div className="flex flex-col gap-2">
                 <div className="flex items-center gap-2">
-                  <label className="text-sm font-medium text-slate-600">Re-entry on SL</label>
+                  <label className="text-sm font-normal text-slate-600">Re-entry on SL</label>
                   <InfoIcon />
                   <ToggleSwitch enabled={form.reentrySLEnabled}
                     onToggle={() => tog("reentrySLEnabled")} />
@@ -905,15 +1045,25 @@ function LazyLegModal({
                   <LegSelect value={form.reentrySLAction} options={legReentryActionOptions}
                     onChange={(v) => handleReentryChange("sl", v)}
                     enabled={form.reentrySLEnabled} className="min-w-[120px]" />
-                  <LegCountSelect value={form.reentrySLCount}
-                    onChange={(v) => upd("reentrySLCount", v)} enabled={form.reentrySLEnabled} />
+                  {form.reentrySLAction === "ReentryType.NextLeg" ? (
+                    <LazyLegReentryPicker
+                      selectedName={form.reentrySLLazyLegName}
+                      lazyLegs={lazyLegs}
+                      enabled={form.reentrySLEnabled}
+                      onSelect={(name) => upd("reentrySLLazyLegName", name)}
+                      onCreateNew={() => setNestedFor("sl")}
+                    />
+                  ) : (
+                    <LegCountSelect value={form.reentrySLCount}
+                      onChange={(v) => upd("reentrySLCount", v)} enabled={form.reentrySLEnabled} />
+                  )}
                 </div>
               </div>
 
               {/* Simple Momentum */}
               <div className="flex flex-col gap-2">
                 <div className="flex items-center gap-2">
-                  <label className="text-sm font-medium text-slate-600">Simple Momentum</label>
+                  <label className="text-sm font-normal text-slate-600">Simple Momentum</label>
                   <InfoIcon />
                   <ToggleSwitch enabled={form.simpleMomentumEnabled}
                     onToggle={() => tog("simpleMomentumEnabled")} />
@@ -933,7 +1083,7 @@ function LazyLegModal({
         {/* ── Footer ── */}
         <div className="flex items-center justify-end gap-3 border-t border-gray-200 px-7 py-4 dark:border-gray-700">
           <Button variant="outline" onClick={onClose}>Cancel</Button>
-          <Button onClick={() => onConfirm(form)}>Create and Select</Button>
+          <Button onClick={() => onConfirm(form)} disabled={nameError || !form.legName.trim()}>Create and Select</Button>
         </div>
 
       </div>
@@ -942,13 +1092,10 @@ function LazyLegModal({
     {nestedFor && (
       <LazyLegModal
         onClose={() => setNestedFor(null)}
-        onConfirm={() => {
-          upd(
-            nestedFor === "tgt" ? "reentryTgtAction" : "reentrySLAction",
-            "ReentryType.NextLeg" as LazyLegForm["reentryTgtAction"]
-          );
-          setNestedFor(null);
-        }}
+        onConfirm={handleNestedConfirm}
+        existingNames={[...existingNames, form.legName, ...lazyLegs.map((l) => l.legName)]}
+        lazyLegs={lazyLegs}
+        onAddLazyLeg={onAddLazyLeg}
       />
     )}
     </>
@@ -1002,15 +1149,38 @@ function LegCountSelect({
 function LazyLegCard({
   form,
   onRemove,
+  onCopy,
+  lazyLegs = [],
+  onAddLazyLeg,
 }: {
   form: LazyLegForm;
   onRemove: () => void;
+  onCopy: () => void;
+  lazyLegs?: LazyLegForm[];
+  onAddLazyLeg?: (f: LazyLegForm) => void;
 }) {
   const [data, setData] = useState<LazyLegForm>(form);
   const upd = <K extends keyof LazyLegForm>(key: K, val: LazyLegForm[K]) =>
     setData((prev) => ({ ...prev, [key]: val }));
   const tog = (key: keyof LazyLegForm) =>
     setData((prev) => ({ ...prev, [key]: !prev[key] }));
+
+  const [cardLazyModal, setCardLazyModal] = useState<"tgt" | "sl" | null>(null);
+
+  const handleCardReentryChange = (which: "tgt" | "sl", value: string) => {
+    upd(which === "tgt" ? "reentryTgtAction" : "reentrySLAction", value);
+    if (value !== "ReentryType.NextLeg") {
+      upd(which === "tgt" ? "reentryTgtLazyLegName" : "reentrySLLazyLegName", "");
+    } else if (lazyLegs.length === 0) {
+      setCardLazyModal(which);
+    }
+  };
+
+  const handleCardLazyConfirm = (newForm: LazyLegForm) => {
+    onAddLazyLeg?.(newForm);
+    upd(cardLazyModal === "tgt" ? "reentryTgtLazyLegName" : "reentrySLLazyLegName", newForm.legName);
+    setCardLazyModal(null);
+  };
 
   const disabledInput = (val: string, key: keyof LazyLegForm, enabled: boolean) => (
     <input
@@ -1042,7 +1212,7 @@ function LazyLegCard({
             <path strokeLinecap="round" strokeLinejoin="round" d="M6 18L18 6M6 6l12 12" />
           </svg>
         </button>
-        <button type="button" className="rounded-full border-2 border-white bg-slate-500 p-1 shadow">
+        <button type="button" onClick={onCopy} className="rounded-full border-2 border-white bg-slate-500 p-1 shadow">
           <svg xmlns="http://www.w3.org/2000/svg" fill="none" viewBox="0 0 24 24"
             strokeWidth="1.5" stroke="currentColor" className="h-3.5 w-3.5 text-white">
             <path strokeLinecap="round" strokeLinejoin="round"
@@ -1149,9 +1319,19 @@ function LazyLegCard({
             </div>
             <div className="flex items-center gap-1.5">
               <LegSelect value={data.reentryTgtAction} options={legReentryActionOptions}
-                onChange={(v) => upd("reentryTgtAction", v)} enabled={data.reentryTgtEnabled} className="min-w-[110px]" />
-              <LegCountSelect value={data.reentryTgtCount}
-                onChange={(v) => upd("reentryTgtCount", v)} enabled={data.reentryTgtEnabled} />
+                onChange={(v) => handleCardReentryChange("tgt", v)} enabled={data.reentryTgtEnabled} className="min-w-[110px]" />
+              {data.reentryTgtAction === "ReentryType.NextLeg" ? (
+                <LazyLegReentryPicker
+                  selectedName={data.reentryTgtLazyLegName}
+                  lazyLegs={lazyLegs}
+                  enabled={data.reentryTgtEnabled}
+                  onSelect={(name) => upd("reentryTgtLazyLegName", name)}
+                  onCreateNew={() => setCardLazyModal("tgt")}
+                />
+              ) : (
+                <LegCountSelect value={data.reentryTgtCount}
+                  onChange={(v) => upd("reentryTgtCount", v)} enabled={data.reentryTgtEnabled} />
+              )}
             </div>
           </div>
 
@@ -1164,9 +1344,19 @@ function LazyLegCard({
             </div>
             <div className="flex items-center gap-1.5">
               <LegSelect value={data.reentrySLAction} options={legReentryActionOptions}
-                onChange={(v) => upd("reentrySLAction", v)} enabled={data.reentrySLEnabled} className="min-w-[110px]" />
-              <LegCountSelect value={data.reentrySLCount}
-                onChange={(v) => upd("reentrySLCount", v)} enabled={data.reentrySLEnabled} />
+                onChange={(v) => handleCardReentryChange("sl", v)} enabled={data.reentrySLEnabled} className="min-w-[110px]" />
+              {data.reentrySLAction === "ReentryType.NextLeg" ? (
+                <LazyLegReentryPicker
+                  selectedName={data.reentrySLLazyLegName}
+                  lazyLegs={lazyLegs}
+                  enabled={data.reentrySLEnabled}
+                  onSelect={(name) => upd("reentrySLLazyLegName", name)}
+                  onCreateNew={() => setCardLazyModal("sl")}
+                />
+              ) : (
+                <LegCountSelect value={data.reentrySLCount}
+                  onChange={(v) => upd("reentrySLCount", v)} enabled={data.reentrySLEnabled} />
+              )}
             </div>
           </div>
 
@@ -1185,6 +1375,16 @@ function LazyLegCard({
           </div>
         </div>
       </div>
+
+      {cardLazyModal && (
+        <LazyLegModal
+          onClose={() => setCardLazyModal(null)}
+          onConfirm={handleCardLazyConfirm}
+          existingNames={lazyLegs.map((l) => l.legName)}
+          lazyLegs={lazyLegs}
+          onAddLazyLeg={onAddLazyLeg}
+        />
+      )}
     </div>
   );
 }
@@ -1194,31 +1394,38 @@ function LegCard({
   index,
   onUpdate,
   onRemove,
+  onCopy,
   onAddLazyLeg,
+  lazyLegs,
 }: {
   leg: LegState;
   index: number;
   onUpdate: (id: number, key: keyof LegState, val: string | boolean) => void;
   onRemove: (id: number) => void;
+  onCopy: (id: number) => void;
   onAddLazyLeg: (form: LazyLegForm) => void;
+  lazyLegs: LazyLegForm[];
 }) {
   const set = (key: keyof LegState, val: string | boolean) =>
     onUpdate(leg.id, key, val);
   const toggle = (key: keyof LegState) => set(key, !(leg[key] as boolean));
 
   const [lazyLegModal, setLazyLegModal] = useState<"tgt" | "sl" | null>(null);
+  const [rangeBreakoutModalOpen, setRangeBreakoutModalOpen] = useState(false);
 
   const handleReentryChange = (which: "tgt" | "sl", value: string) => {
-    if (value === "ReentryType.NextLeg") {
+    set(which === "tgt" ? "reentryTgtAction" : "reentrySLAction", value);
+    if (value !== "ReentryType.NextLeg") {
+      set(which === "tgt" ? "reentryTgtLazyLegName" : "reentrySLLazyLegName", "");
+    } else if (lazyLegs.length === 0) {
       setLazyLegModal(which);
-    } else {
-      set(which === "tgt" ? "reentryTgtAction" : "reentrySLAction", value);
     }
   };
 
   const handleLazyConfirm = (form: LazyLegForm) => {
     if (lazyLegModal) {
       set(lazyLegModal === "tgt" ? "reentryTgtAction" : "reentrySLAction", "ReentryType.NextLeg");
+      set(lazyLegModal === "tgt" ? "reentryTgtLazyLegName" : "reentrySLLazyLegName", form.legName);
     }
     onAddLazyLeg(form);
     setLazyLegModal(null);
@@ -1235,6 +1442,14 @@ function LegCard({
       }`}
     />
   );
+
+  const handleRangeBreakoutToggle = () => {
+    if (leg.rangeBreakoutEnabled) {
+      set("rangeBreakoutEnabled", false);
+      return;
+    }
+    setRangeBreakoutModalOpen(true);
+  };
 
   return (
     <div className="relative rounded-md border border-slate-200 bg-white p-5 md:p-6">
@@ -1254,7 +1469,7 @@ function LegCard({
             <path strokeLinecap="round" strokeLinejoin="round" d="M6 18L18 6M6 6l12 12" />
           </svg>
         </button>
-        <button type="button"
+        <button type="button" onClick={() => onCopy(leg.id)}
           className="rounded-full border-2 border-white bg-slate-500 p-1 shadow">
           <svg xmlns="http://www.w3.org/2000/svg" fill="none" viewBox="0 0 24 24"
             strokeWidth="1.5" stroke="currentColor" className="h-3.5 w-3.5 text-white">
@@ -1380,8 +1595,18 @@ function LegCard({
               <LegSelect value={leg.reentryTgtAction} options={legReentryActionOptions}
                 onChange={(v) => handleReentryChange("tgt", v)}
                 enabled={leg.reentryTgtEnabled} className="min-w-[110px]" />
-              <LegCountSelect value={leg.reentryTgtCount}
-                onChange={(v) => set("reentryTgtCount", v)} enabled={leg.reentryTgtEnabled} />
+              {leg.reentryTgtAction === "ReentryType.NextLeg" ? (
+                <LazyLegReentryPicker
+                  selectedName={leg.reentryTgtLazyLegName}
+                  lazyLegs={lazyLegs}
+                  enabled={leg.reentryTgtEnabled}
+                  onSelect={(name) => set("reentryTgtLazyLegName", name)}
+                  onCreateNew={() => setLazyLegModal("tgt")}
+                />
+              ) : (
+                <LegCountSelect value={leg.reentryTgtCount}
+                  onChange={(v) => set("reentryTgtCount", v)} enabled={leg.reentryTgtEnabled} />
+              )}
             </div>
           </div>
 
@@ -1397,8 +1622,18 @@ function LegCard({
               <LegSelect value={leg.reentrySLAction} options={legReentryActionOptions}
                 onChange={(v) => handleReentryChange("sl", v)}
                 enabled={leg.reentrySLEnabled} className="min-w-[110px]" />
-              <LegCountSelect value={leg.reentrySLCount}
-                onChange={(v) => set("reentrySLCount", v)} enabled={leg.reentrySLEnabled} />
+              {leg.reentrySLAction === "ReentryType.NextLeg" ? (
+                <LazyLegReentryPicker
+                  selectedName={leg.reentrySLLazyLegName}
+                  lazyLegs={lazyLegs}
+                  enabled={leg.reentrySLEnabled}
+                  onSelect={(name) => set("reentrySLLazyLegName", name)}
+                  onCreateNew={() => setLazyLegModal("sl")}
+                />
+              ) : (
+                <LegCountSelect value={leg.reentrySLCount}
+                  onChange={(v) => set("reentrySLCount", v)} enabled={leg.reentrySLEnabled} />
+              )}
             </div>
           </div>
 
@@ -1423,7 +1658,7 @@ function LegCard({
             <div className="flex items-center gap-2">
               <FieldLabel>Range Breakout</FieldLabel>
               <ToggleSwitch enabled={leg.rangeBreakoutEnabled}
-                onToggle={() => toggle("rangeBreakoutEnabled")} />
+                onToggle={handleRangeBreakoutToggle} />
             </div>
             <div className={`flex items-center gap-2 ${
               leg.rangeBreakoutEnabled ? "" : "pointer-events-none opacity-40"
@@ -1457,9 +1692,174 @@ function LegCard({
         <LazyLegModal
           onClose={() => setLazyLegModal(null)}
           onConfirm={handleLazyConfirm}
+          existingNames={lazyLegs.map((l) => l.legName)}
+          lazyLegs={lazyLegs}
+          onAddLazyLeg={onAddLazyLeg}
+        />
+      )}
+
+      {rangeBreakoutModalOpen && (
+        <RangeBreakoutModal
+          initialEndTime={leg.rangeBreakoutTime || "09:45"}
+          initialEntryOn={(leg.rangeBreakoutHighLow as "High" | "Low") || "High"}
+          initialTracking={leg.rangeBreakoutTracking || "false"}
+          onClose={() => {
+            setRangeBreakoutModalOpen(false);
+            set("rangeBreakoutEnabled", false);
+          }}
+          onConfirm={({ endTime, entryOn, tracking }) => {
+            set("rangeBreakoutTime", endTime);
+            set("rangeBreakoutHighLow", entryOn);
+            set("rangeBreakoutTracking", tracking);
+            set("rangeBreakoutEnabled", true);
+            setRangeBreakoutModalOpen(false);
+          }}
         />
       )}
     </div>
+  );
+}
+
+function RangeBreakoutModal({
+  initialEndTime,
+  initialEntryOn,
+  initialTracking,
+  onClose,
+  onConfirm,
+}: {
+  initialEndTime: string;
+  initialEntryOn: "High" | "Low";
+  initialTracking: string;
+  onClose: () => void;
+  onConfirm: (config: {
+    endTime: string;
+    entryOn: "High" | "Low";
+    tracking: string;
+  }) => void;
+}) {
+  const [endTime, setEndTime] = useState(initialEndTime || "09:45");
+  const [entryOn, setEntryOn] = useState<"High" | "Low">(initialEntryOn || "High");
+  const [tracking, setTracking] = useState(initialTracking || "false");
+  const trackingLabel =
+    rangeBreakoutModalTrackingOptions.find((opt) => opt.value === tracking)?.label || "Strike Price";
+  const trackingUntil = subtractOneSecond(endTime);
+
+  return (
+    <Modal isOpen onClose={onClose} className="max-w-[640px] m-4 p-0" showCloseButton={false}>
+      <div className="rounded-2xl bg-white">
+        <div className="flex items-center justify-between border-b border-slate-200 px-6 py-5">
+          <h2 className="text-[30px] leading-none text-slate-900">Range Breakout</h2>
+          <button
+            type="button"
+            onClick={onClose}
+            className="text-slate-500 transition hover:text-slate-700"
+            aria-label="Close range breakout modal"
+          >
+            <svg xmlns="http://www.w3.org/2000/svg" fill="none" viewBox="0 0 24 24"
+              stroke="currentColor" className="h-6 w-6">
+              <path strokeLinecap="round" strokeLinejoin="round" strokeWidth={1.7} d="M6 18L18 6M6 6l12 12" />
+            </svg>
+          </button>
+        </div>
+
+        <div className="space-y-8 px-6 py-5">
+          <div className="flex flex-wrap gap-4 md:gap-8">
+            <div className="flex flex-col gap-2">
+              <label className="text-sm font-normal text-slate-500">Start Time</label>
+              <input
+                type="text"
+                value="09:35"
+                disabled
+                className="w-[104px] rounded-md border border-slate-200 bg-slate-50 px-3 py-2 text-sm text-slate-400"
+              />
+            </div>
+
+            <div className="flex flex-col gap-2">
+              <label className="text-sm font-normal text-slate-700">End Time</label>
+              <div className="relative">
+                <input
+                  type="time"
+                  value={endTime}
+                  onChange={(e) => setEndTime(e.target.value)}
+                  className="w-[104px] rounded-md border border-slate-300 px-3 py-2 pr-9 text-sm text-slate-700 focus:outline-none focus:ring-1 focus:ring-[#465fff]/60"
+                />
+                <svg xmlns="http://www.w3.org/2000/svg" fill="none" viewBox="0 0 24 24"
+                  stroke="currentColor" className="pointer-events-none absolute right-3 top-2.5 h-4 w-4 text-slate-500">
+                  <path strokeLinecap="round" strokeLinejoin="round" strokeWidth={1.7} d="M12 6v6l4 2" />
+                  <path strokeLinecap="round" strokeLinejoin="round" strokeWidth={1.7} d="M21 12a9 9 0 11-18 0 9 9 0 0118 0z" />
+                </svg>
+              </div>
+            </div>
+          </div>
+
+          <div className="flex flex-wrap gap-6 md:gap-10">
+            <div className="flex flex-col gap-2">
+              <label className="text-sm font-normal text-slate-700">Entry on</label>
+              <div className="inline-flex overflow-hidden rounded-md border border-slate-300">
+                {(["High", "Low"] as const).map((opt) => (
+                  <button
+                    key={opt}
+                    type="button"
+                    onClick={() => setEntryOn(opt)}
+                    className={`min-w-[56px] px-4 py-2 text-sm transition ${
+                      entryOn === opt
+                        ? "bg-[#1284d0]/15 text-[#1284d0]"
+                        : "bg-white text-slate-700 hover:bg-slate-50"
+                    }`}
+                  >
+                    {opt}
+                  </button>
+                ))}
+              </div>
+            </div>
+
+            <div className="flex flex-col gap-2">
+              <label className="text-sm font-normal text-slate-700">Tracking</label>
+              <div className="inline-flex overflow-hidden rounded-md border border-slate-300">
+                {rangeBreakoutModalTrackingOptions.map((opt) => (
+                  <button
+                    key={opt.value}
+                    type="button"
+                    onClick={() => setTracking(opt.value)}
+                    className={`min-w-[96px] px-4 py-2 text-sm transition ${
+                      tracking === opt.value
+                        ? "bg-[#1284d0]/15 text-[#1284d0]"
+                        : "bg-white text-slate-700 hover:bg-slate-50"
+                    }`}
+                  >
+                    {opt.label}
+                  </button>
+                ))}
+              </div>
+            </div>
+          </div>
+
+          <p className="max-w-[560px] text-[15px] leading-8 text-slate-800">
+            We will start by tracking the <span className="font-semibold">Selected {trackingLabel}</span> between{" "}
+            <span className="font-semibold">09:35:00</span> and <span className="font-semibold">{trackingUntil}</span>.
+            We will take entry after <span className="font-semibold">{trackingUntil}</span> once the{" "}
+            <span className="font-semibold">{entryOn}</span> price of the{" "}
+            <span className="font-semibold">Selected Strike</span> in the range is breached.
+          </p>
+        </div>
+
+        <div className="flex items-center justify-end gap-4 px-6 pb-5">
+          <button
+            type="button"
+            onClick={onClose}
+            className="px-3 py-2 text-sm text-slate-600 transition hover:text-slate-900"
+          >
+            Cancel
+          </button>
+          <Button
+            onClick={() => onConfirm({ endTime, entryOn, tracking })}
+            className="rounded-md bg-[#0f4c81] px-6 py-2.5 text-sm hover:bg-[#0b3f6b]"
+          >
+            Confirm
+          </Button>
+        </div>
+      </div>
+    </Modal>
   );
 }
 
@@ -1557,35 +1957,51 @@ export default function BacktestStrategy() {
     setLegs((prev) => prev.filter((l) => l.id !== id));
   };
 
+  const copyLeg = (id: number) => {
+    const src = legs.find((l) => l.id === id);
+    if (!src) return;
+    setLegs((prev) => [...prev, { ...src, id: nextLegId }]);
+    setNextLegId((n) => n + 1);
+  };
+
   // ── Lazy Leg instances ──
   const [lazyLegs, setLazyLegs] = useState<LazyLegForm[]>([]);
 
   const addLazyLeg = (form: LazyLegForm) => {
-    setLazyLegs((prev) => [...prev, form]);
+    setLazyLegs((prev) =>
+      prev.some((l) => l.legName === form.legName) ? prev : [...prev, form]
+    );
   };
 
   const removeLazyLeg = (index: number) => {
     setLazyLegs((prev) => prev.filter((_, i) => i !== index));
   };
 
+  const copyLazyLeg = (form: LazyLegForm) => {
+    setLazyLegs((prev) => {
+      const newName = uniqueLazyName(prev.map((l) => l.legName));
+      return [...prev, { ...form, legName: newName }];
+    });
+  };
+
   // ── Overall strategy settings ──
-  const [overallSLEnabled, setOverallSLEnabled] = useState(true);
+  const [overallSLEnabled, setOverallSLEnabled] = useState(false);
   const [overallSLType, setOverallSLType] = useState("OverallTgtSLType.MTM");
   const [overallSLValue, setOverallSLValue] = useState("");
-  const [overallSLReentryEnabled, setOverallSLReentryEnabled] = useState(true);
+  const [overallSLReentryEnabled, setOverallSLReentryEnabled] = useState(false);
   const [overallSLReentryAction, setOverallSLReentryAction] =
     useState("ReentryType.Immediate");
   const [overallSLReentryCount, setOverallSLReentryCount] = useState("1");
 
-  const [overallTgtEnabled, setOverallTgtEnabled] = useState(true);
+  const [overallTgtEnabled, setOverallTgtEnabled] = useState(false);
   const [overallTgtType, setOverallTgtType] = useState("OverallTgtSLType.MTM");
   const [overallTgtValue, setOverallTgtValue] = useState("");
-  const [overallTgtReentryEnabled, setOverallTgtReentryEnabled] = useState(true);
+  const [overallTgtReentryEnabled, setOverallTgtReentryEnabled] = useState(false);
   const [overallTgtReentryAction, setOverallTgtReentryAction] =
     useState("ReentryType.Immediate");
   const [overallTgtReentryCount, setOverallTgtReentryCount] = useState("1");
 
-  const [trailingEnabled, setTrailingEnabled] = useState(true);
+  const [trailingEnabled, setTrailingEnabled] = useState(false);
   const [trailingType, setTrailingType] = useState("TrailingOption.Lock");
   const [trailingProfitReaches, setTrailingProfitReaches] = useState("0");
   const [trailingLockProfit, setTrailingLockProfit] = useState("1");
@@ -1753,7 +2169,7 @@ export default function BacktestStrategy() {
                   </h6>
                   <div className="flex h-full flex-col items-center justify-center gap-8 rounded-md border border-slate-200 bg-white p-6">
                     <div className="flex flex-wrap items-center justify-between gap-2">
-                      <label className="flex items-center gap-2 text-sm font-medium text-slate-600">
+                      <label className="flex items-center gap-2 text-sm font-normal text-slate-600">
                         Square Off
                         <InfoIcon />
                       </label>
@@ -2053,7 +2469,9 @@ export default function BacktestStrategy() {
                       index={idx}
                       onUpdate={updateLeg}
                       onRemove={removeLeg}
+                      onCopy={copyLeg}
                       onAddLazyLeg={addLazyLeg}
+                      lazyLegs={lazyLegs}
                     />
                   ))}
                 </div>
@@ -2070,6 +2488,9 @@ export default function BacktestStrategy() {
                       key={idx}
                       form={form}
                       onRemove={() => removeLazyLeg(idx)}
+                      onCopy={() => copyLazyLeg(form)}
+                      lazyLegs={lazyLegs}
+                      onAddLazyLeg={addLazyLeg}
                     />
                   ))}
                 </div>
@@ -2085,218 +2506,112 @@ export default function BacktestStrategy() {
                 <InfoIcon />
               </div>
 
-              <div className="grid gap-4 xl:grid-cols-[220px_220px_1fr]">
-                {/* Overall Stop Loss */}
-                <SettingBox
-                  title="Overall Stop Loss"
-                  top={
-                    <div className="flex items-center justify-between">
-                      <FieldLabel>Overall Stop Loss</FieldLabel>
-                      <ToggleSwitch
-                        enabled={overallSLEnabled}
-                        onToggle={() => setOverallSLEnabled((v) => !v)}
-                      />
-                    </div>
-                  }
-                  bottom={
-                    <div className="space-y-3">
-                      <div className="flex items-center gap-2">
-                        <div className="w-[130px]">
-                          <CompactSelect
-                            value={overallSLType}
-                            options={overallTgtSLTypeOptions}
-                            onChange={setOverallSLType}
-                            wide
-                            className="rounded-[4px] !border-[#2d77c7] !bg-[#1b6ca8] !text-white focus:!border-[#2d77c7] focus:!ring-0"
-                            menuClassName="rounded-none !border-[#1b6ca8] !bg-[#165f95] py-0 shadow-none"
-                            optionClassName="border-b border-[#2d77c7]/20 !bg-[#165f95] py-1.5 !text-white hover:!bg-[#1e73af] dark:!bg-[#165f95] dark:!text-white dark:hover:!bg-[#1e73af]"
-                            selectedOptionClassName="border-b border-[#2d77c7]/20 !bg-[#2f74db] py-1.5 font-semibold !text-white dark:!bg-[#2f74db] dark:!text-white"
-                            iconClassName="!text-white"
-                            triggerStyle={{ backgroundColor: "#1b6ca8", color: "#ffffff", borderColor: "#2d77c7" }}
-                            menuStyle={{ backgroundColor: "#165f95", borderColor: "#1b6ca8" }}
-                            optionStyle={{ backgroundColor: "#165f95", color: "#ffffff" }}
-                            selectedOptionStyle={{ backgroundColor: "#2f74db", color: "#ffffff" }}
-                            iconStyle={{ color: "#ffffff" }}
-                          />
-                        </div>
-                        <TextInput
-                          value={overallSLValue}
-                          onChange={setOverallSLValue}
-                          type="number"
-                          className="min-w-[60px]"
-                        />
-                      </div>
-                      <div className="flex items-center justify-between">
-                        <div className="flex items-center gap-2">
-                          <FieldLabel>Overall Re-entry on SL</FieldLabel>
-                          <InfoIcon />
-                        </div>
-                        <ToggleSwitch
-                          enabled={overallSLReentryEnabled}
-                          onToggle={() => setOverallSLReentryEnabled((v) => !v)}
-                        />
-                      </div>
-                      <div className="flex items-center gap-2">
-                        <div className="w-[130px]">
-                          <CompactSelect
-                            value={overallSLReentryAction}
-                            options={overallActionOptions}
-                            onChange={setOverallSLReentryAction}
-                            wide
-                          />
-                        </div>
-                        <div className="w-[72px]">
-                          <CompactSelect
-                            value={overallSLReentryCount}
-                            options={reentryCountOptions}
-                            onChange={setOverallSLReentryCount}
-                          />
-                        </div>
-                      </div>
-                    </div>
-                  }
-                />
+              <div className="flex flex-wrap gap-4">
 
-                {/* Overall Target */}
-                <SettingBox
-                  title="Overall Target"
-                  top={
-                    <div className="flex items-center justify-between">
-                      <FieldLabel>Overall Target</FieldLabel>
-                      <ToggleSwitch
-                        enabled={overallTgtEnabled}
-                        onToggle={() => setOverallTgtEnabled((v) => !v)}
-                      />
+                {/* ── Overall Stop Loss ── */}
+                <div className="rounded-md border border-slate-200 bg-white p-5 min-w-[240px]">
+                  <div className="flex items-center justify-between gap-4">
+                    <FieldLabel>Overall Stop Loss</FieldLabel>
+                    <ToggleSwitch enabled={overallSLEnabled} onToggle={() => setOverallSLEnabled((v) => !v)} />
+                  </div>
+                  <div className={`mt-4 flex flex-col gap-4 ${overallSLEnabled ? "" : "pointer-events-none opacity-40"}`}>
+                    <div className="flex items-center gap-2">
+                      <LegSelect value={overallSLType} options={overallTgtSLTypeOptions}
+                        onChange={setOverallSLType} enabled={overallSLEnabled} className="min-w-[140px]" />
+                      <input type="number" value={overallSLValue}
+                        onChange={(e) => setOverallSLValue(e.target.value)}
+                        className="w-20 rounded border border-slate-300 px-2 py-1.5 text-sm text-slate-700 focus:outline-none" />
                     </div>
-                  }
-                  bottom={
-                    <div className="space-y-3">
+                    <div className="border-t border-slate-100 pt-4">
                       <div className="flex items-center gap-2">
-                        <div className="w-[130px]">
-                          <CompactSelect
-                            value={overallTgtType}
-                            options={overallTgtSLTypeOptions}
-                            onChange={setOverallTgtType}
-                            wide
-                            className="rounded-[4px] !border-[#2d77c7] !bg-[#1b6ca8] !text-white focus:!border-[#2d77c7] focus:!ring-0"
-                            menuClassName="rounded-none !border-[#1b6ca8] !bg-[#165f95] py-0 shadow-none"
-                            optionClassName="border-b border-[#2d77c7]/20 !bg-[#165f95] py-1.5 !text-white hover:!bg-[#1e73af] dark:!bg-[#165f95] dark:!text-white dark:hover:!bg-[#1e73af]"
-                            selectedOptionClassName="border-b border-[#2d77c7]/20 !bg-[#2f74db] py-1.5 font-semibold !text-white dark:!bg-[#2f74db] dark:!text-white"
-                            iconClassName="!text-white"
-                            triggerStyle={{ backgroundColor: "#1b6ca8", color: "#ffffff", borderColor: "#2d77c7" }}
-                            menuStyle={{ backgroundColor: "#165f95", borderColor: "#1b6ca8" }}
-                            optionStyle={{ backgroundColor: "#165f95", color: "#ffffff" }}
-                            selectedOptionStyle={{ backgroundColor: "#2f74db", color: "#ffffff" }}
-                            iconStyle={{ color: "#ffffff" }}
-                          />
-                        </div>
-                        <TextInput
-                          value={overallTgtValue}
-                          onChange={setOverallTgtValue}
-                          type="number"
-                          className="min-w-[60px]"
-                        />
+                        <FieldLabel>Re-entry on SL</FieldLabel>
+                        <InfoIcon />
+                        <ToggleSwitch enabled={overallSLReentryEnabled}
+                          onToggle={() => setOverallSLReentryEnabled((v) => !v)} />
                       </div>
-                      <div className="flex items-center justify-between">
-                        <div className="flex items-center gap-2">
-                          <FieldLabel>Overall Re-entry on Tgt</FieldLabel>
-                          <InfoIcon />
-                        </div>
-                        <ToggleSwitch
-                          enabled={overallTgtReentryEnabled}
-                          onToggle={() =>
-                            setOverallTgtReentryEnabled((v) => !v)
-                          }
-                        />
-                      </div>
-                      <div className="flex items-center gap-2">
-                        <div className="w-[130px]">
-                          <CompactSelect
-                            value={overallTgtReentryAction}
-                            options={overallActionOptions}
-                            onChange={setOverallTgtReentryAction}
-                            wide
-                          />
-                        </div>
-                        <div className="w-[72px]">
-                          <CompactSelect
-                            value={overallTgtReentryCount}
-                            options={reentryCountOptions}
-                            onChange={setOverallTgtReentryCount}
-                          />
-                        </div>
+                      <div className={`mt-2 flex items-center gap-2 ${overallSLReentryEnabled ? "" : "pointer-events-none opacity-40"}`}>
+                        <LegSelect value={overallSLReentryAction} options={overallActionOptions}
+                          onChange={setOverallSLReentryAction} enabled={overallSLReentryEnabled} className="min-w-[110px]" />
+                        <LegCountSelect value={overallSLReentryCount}
+                          onChange={setOverallSLReentryCount} enabled={overallSLReentryEnabled} />
                       </div>
                     </div>
-                  }
-                />
+                  </div>
+                </div>
 
-                {/* Trailing Options */}
-                <SettingBox
-                  title="Trailing Options"
-                  top={
-                    <div className="flex items-center justify-between">
-                      <FieldLabel>Trailing Options</FieldLabel>
-                      <ToggleSwitch
-                        enabled={trailingEnabled}
-                        onToggle={() => setTrailingEnabled((v) => !v)}
-                      />
+                {/* ── Overall Target ── */}
+                <div className="rounded-md border border-slate-200 bg-white p-5 min-w-[240px]">
+                  <div className="flex items-center justify-between gap-4">
+                    <FieldLabel>Overall Target</FieldLabel>
+                    <ToggleSwitch enabled={overallTgtEnabled} onToggle={() => setOverallTgtEnabled((v) => !v)} />
+                  </div>
+                  <div className={`mt-4 flex flex-col gap-4 ${overallTgtEnabled ? "" : "pointer-events-none opacity-40"}`}>
+                    <div className="flex items-center gap-2">
+                      <LegSelect value={overallTgtType} options={overallTgtSLTypeOptions}
+                        onChange={setOverallTgtType} enabled={overallTgtEnabled} className="min-w-[140px]" />
+                      <input type="number" value={overallTgtValue}
+                        onChange={(e) => setOverallTgtValue(e.target.value)}
+                        className="w-20 rounded border border-slate-300 px-2 py-1.5 text-sm text-slate-700 focus:outline-none" />
                     </div>
-                  }
-                  bottom={
-                    <div className="space-y-3">
-                      <div className="w-[160px]">
-                        <CompactSelect
-                          value={trailingType}
-                          options={trailingTypeOptions}
-                          onChange={setTrailingType}
-                          wide
-                        />
+                    <div className="border-t border-slate-100 pt-4">
+                      <div className="flex items-center gap-2">
+                        <FieldLabel>Re-entry on Tgt</FieldLabel>
+                        <InfoIcon />
+                        <ToggleSwitch enabled={overallTgtReentryEnabled}
+                          onToggle={() => setOverallTgtReentryEnabled((v) => !v)} />
                       </div>
-                      <div className="flex flex-wrap items-center gap-5 text-sm text-slate-700">
-                        <div className="flex items-center gap-3">
-                          <FieldLabel>If profit reaches</FieldLabel>
-                          <TextInput
-                            value={trailingProfitReaches}
-                            onChange={setTrailingProfitReaches}
-                            type="number"
-                            className="min-w-[70px]"
-                          />
-                        </div>
-                        <div className="flex items-center gap-3">
-                          <FieldLabel>Lock profit</FieldLabel>
-                          <TextInput
-                            value={trailingLockProfit}
-                            onChange={setTrailingLockProfit}
-                            type="number"
-                            className="min-w-[70px]"
-                          />
-                        </div>
+                      <div className={`mt-2 flex items-center gap-2 ${overallTgtReentryEnabled ? "" : "pointer-events-none opacity-40"}`}>
+                        <LegSelect value={overallTgtReentryAction} options={overallActionOptions}
+                          onChange={setOverallTgtReentryAction} enabled={overallTgtReentryEnabled} className="min-w-[110px]" />
+                        <LegCountSelect value={overallTgtReentryCount}
+                          onChange={setOverallTgtReentryCount} enabled={overallTgtReentryEnabled} />
                       </div>
-                      {trailingType === "TrailingOption.LockAndTrail" && (
-                        <div className="flex flex-wrap items-center gap-5">
-                          <div className="flex items-center gap-3">
-                            <FieldLabel>For every increase in profit by</FieldLabel>
-                            <TextInput
-                              value={trailingIncreaseBy}
-                              onChange={setTrailingIncreaseBy}
-                              type="number"
-                              className="min-w-[70px]"
-                            />
-                          </div>
-                          <div className="flex items-center gap-3">
-                            <FieldLabel>Trail profit by</FieldLabel>
-                            <TextInput
-                              value={trailingTrailBy}
-                              onChange={setTrailingTrailBy}
-                              type="number"
-                              className="min-w-[70px]"
-                            />
-                          </div>
-                        </div>
-                      )}
                     </div>
-                  }
-                />
+                  </div>
+                </div>
+
+                {/* ── Trailing Options ── */}
+                <div className="rounded-md border border-slate-200 bg-white p-5 min-w-[300px]">
+                  <div className="flex items-center justify-between gap-4">
+                    <FieldLabel>Trailing Options</FieldLabel>
+                    <ToggleSwitch enabled={trailingEnabled} onToggle={() => setTrailingEnabled((v) => !v)} />
+                  </div>
+                  <div className={`mt-4 flex flex-col gap-4 ${trailingEnabled ? "" : "pointer-events-none opacity-40"}`}>
+                    <NativeSelect value={trailingType} options={trailingTypeOptions}
+                      onChange={setTrailingType} className="min-w-[180px]" />
+                    <div className="flex flex-wrap items-center gap-4">
+                      <div className="flex items-center gap-2">
+                        <FieldLabel>If profit reaches</FieldLabel>
+                        <input type="number" value={trailingProfitReaches}
+                          onChange={(e) => setTrailingProfitReaches(e.target.value)}
+                          className="w-20 rounded border border-slate-300 px-2 py-1.5 text-sm text-slate-700 focus:outline-none" />
+                      </div>
+                      <div className="flex items-center gap-2">
+                        <FieldLabel>Lock profit</FieldLabel>
+                        <input type="number" value={trailingLockProfit}
+                          onChange={(e) => setTrailingLockProfit(e.target.value)}
+                          className="w-20 rounded border border-slate-300 px-2 py-1.5 text-sm text-slate-700 focus:outline-none" />
+                      </div>
+                    </div>
+                    {trailingType === "TrailingOption.LockAndTrail" && (
+                      <div className="flex flex-wrap items-center gap-4">
+                        <div className="flex items-center gap-2">
+                          <FieldLabel>Increase profit by</FieldLabel>
+                          <input type="number" value={trailingIncreaseBy}
+                            onChange={(e) => setTrailingIncreaseBy(e.target.value)}
+                            className="w-20 rounded border border-slate-300 px-2 py-1.5 text-sm text-slate-700 focus:outline-none" />
+                        </div>
+                        <div className="flex items-center gap-2">
+                          <FieldLabel>Trail profit by</FieldLabel>
+                          <input type="number" value={trailingTrailBy}
+                            onChange={(e) => setTrailingTrailBy(e.target.value)}
+                            className="w-20 rounded border border-slate-300 px-2 py-1.5 text-sm text-slate-700 focus:outline-none" />
+                        </div>
+                      </div>
+                    )}
+                  </div>
+                </div>
+
               </div>
             </section>
 
@@ -2307,7 +2622,7 @@ export default function BacktestStrategy() {
               </span>
               <div className="relative flex w-full items-center gap-4 md:w-max md:flex-row md:gap-10">
                 <div className="flex items-center justify-between gap-3">
-                  <label className="text-sm font-medium leading-6 text-slate-700">
+                  <label className="text-sm font-normal leading-6 text-slate-700">
                     Start Date
                   </label>
                   <input
@@ -2318,7 +2633,7 @@ export default function BacktestStrategy() {
                   />
                 </div>
                 <div className="flex items-center justify-between gap-3">
-                  <label className="text-sm font-medium leading-6 text-slate-700">
+                  <label className="text-sm font-normal leading-6 text-slate-700">
                     End Date
                   </label>
                   <input

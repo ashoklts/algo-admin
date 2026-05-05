@@ -1,8 +1,7 @@
-import { useCallback, useEffect, useRef, useState } from "react";
-import { useNavigate } from "react-router";
+import { useCallback, useEffect, useMemo, useRef, useState } from "react";
 import PageMeta from "../../components/common/PageMeta";
 import { Modal } from "../../components/ui/modal";
-import Button from "../../components/ui/button/Button";
+import { calculateMargin, type SpanPos } from "../../utils/spanMargin";
 
 const API_BASE = import.meta.env.VITE_API_BASE_URL as string;
 const ACTIVATION_MODE = "algo-backtest";      // socket param
@@ -82,7 +81,9 @@ interface DeployedRecord {
   strategy_feature_status_rows?: StrategyFeatureRow[];
   overall_sl_reentry_done?: number; overall_tgt_reentry_done?: number;
   last_overall_event_reason?: string;
+  entry_time?: string;
 }
+interface MtmHistoricalEntry { timestamp: string[]; open: number[]; high: number[]; low: number[]; close: number[]; volume: number[] }
 interface Group { group_id: string; group_name: string; portfolio_id: string; items: DeployedRecord[] }
 interface BrokerEntry { key: string; label: string; icon: string; brokerId: string; userId: string; strategyCount: number; openLegCount: number; mtm: number }
 
@@ -109,6 +110,12 @@ function mergeLtpItems(items: LtpItem[], map: Record<string, LtpItem>) {
   for (const item of items) {
     const key = getLtpSnapshotKey(item);
     if (key) map[key] = { ...(map[key] ?? {}), ...item };
+    // SPOT items have a token (e.g. "NSE_01") so getLtpSnapshotKey stores them
+    // as "token:NSE_01", but recalcMargin looks up "spot:NIFTY" — store both.
+    const und = String(item.underlying ?? "").trim().toUpperCase();
+    if (und && String(item.option_type ?? "").trim().toUpperCase() === "SPOT") {
+      map["spot:" + und] = { ...(map["spot:" + und] ?? {}), ...item };
+    }
   }
 }
 
@@ -162,6 +169,60 @@ function computeStrategyPnl(rec: DeployedRecord, ltpMap: Record<string, LtpItem>
   return total;
 }
 
+// ─── Brokerage & Taxes ───────────────────────────────────────────────────────
+
+const NSE_STT = 0.001, NSE_EXCHANGE = 0.00053, NSE_STAMP = 0.00003, NSE_SEBI = 0.0000010, NSE_GST = 0.18;
+
+interface TaxBucket { stt: number; exchange: number; stamp: number; sebi: number; gst: number; total: number }
+interface BtChargeLeg { lots: number; lot_size: number; position: string; entry_price: number; exit_price: number }
+interface BtChargeTrade { legs: BtChargeLeg[] }
+
+function buildChargeLeg(leg: Leg): BtChargeLeg {
+  const qty = Number(leg.quantity) || 0;
+  const lotSize = Number(leg.lot_size) || 1;
+  return {
+    lots: qty / lotSize || 1,
+    lot_size: lotSize,
+    position: String(leg.position ?? "sell"),
+    entry_price: Number(leg.entry_trade?.price ?? leg.entry_trade?.trigger_price ?? 0) || 0,
+    exit_price: Number(leg.exit_trade?.price ?? leg.exit_trade?.trigger_price ?? 0) || 0,
+  };
+}
+
+function buildAllChargeTrades(records: DeployedRecord[]): BtChargeTrade[] {
+  return records
+    .map(rec => ({ legs: (rec.legs ?? []).filter(l => l.entry_trade).map(buildChargeLeg) }))
+    .filter(t => t.legs.length > 0);
+}
+
+function calcBtBrokerage(trades: BtChargeTrade[], rate: number, rateType: string): number {
+  if (rate <= 0) return 0;
+  return trades.reduce((s, t) => {
+    const lots = t.legs.reduce((ls, l) => ls + l.lots, 0) || 1;
+    return s + (rateType === "per_lot" ? rate * lots : rate * (t.legs.length || 1));
+  }, 0);
+}
+
+function calcBtTaxes(trades: BtChargeTrade[]): TaxBucket {
+  let stt = 0, exchange = 0, stamp = 0, sebi = 0;
+  for (const t of trades) {
+    for (const leg of t.legs) {
+      const isSell = !leg.position.toLowerCase().includes("buy");
+      const qty = leg.lots * leg.lot_size;
+      const entryT = leg.entry_price * qty;
+      const exitT = leg.exit_price * qty;
+      if (isSell) { stt += entryT * NSE_STT; stamp += exitT * NSE_STAMP; }
+      else { stamp += entryT * NSE_STAMP; stt += exitT * NSE_STT; }
+      exchange += (entryT + exitT) * NSE_EXCHANGE;
+      sebi += (entryT + exitT) * NSE_SEBI;
+    }
+  }
+  const gst = (exchange + sebi) * NSE_GST;
+  return { stt, exchange, stamp, sebi, gst, total: stt + exchange + stamp + sebi + gst };
+}
+
+const ZERO_TAX: TaxBucket = { stt: 0, exchange: 0, stamp: 0, sebi: 0, gst: 0, total: 0 };
+
 // ─── Generic helpers ──────────────────────────────────────────────────────────
 
 function isObjectId(v: unknown) { return /^[a-f0-9]{24}$/i.test(String(v ?? "")); }
@@ -193,6 +254,25 @@ function normalizeStatus(rec: DeployedRecord): { text: string; cls: string } {
   if (s.includes("Stopped")) return { text: "STOPPED", cls: "stopped" };
   if (s.includes("Running") || s.includes("Live") || rec.active_on_server) return { text: "RUNNING", cls: "running" };
   return { text: "STOPPED", cls: "stopped" };
+}
+function entryCountdown(entryRaw: string, currentHMS: string): string | null {
+  const toSecs = (s: string): number | null => {
+    const parts = s.slice(0, 8).split(":").map(Number);
+    if (parts.length < 2 || parts.some(isNaN)) return null;
+    return (parts[0] ?? 0) * 3600 + (parts[1] ?? 0) * 60 + (parts[2] ?? 0);
+  };
+  const eHMS = entryRaw.length >= 16 ? entryRaw.slice(11, 19) : entryRaw.slice(0, 8);
+  const eSecs = toSecs(eHMS);
+  const cSecs = toSecs(currentHMS);
+  if (eSecs === null || cSecs === null || eSecs <= cSecs) return null;
+  const diff = eSecs - cSecs;
+  const h = Math.floor(diff / 3600);
+  const m = Math.floor((diff % 3600) / 60);
+  const s = diff % 60;
+  const hh = String(h).padStart(2, "0");
+  const mm = String(m).padStart(2, "0");
+  const ss = String(s).padStart(2, "0");
+  return `${hh}:${mm}:${ss}`;
 }
 function groupRecords(records: DeployedRecord[]): Group[] {
   const map: Record<string, Group> = {};
@@ -698,6 +778,9 @@ function BrokerSettingsModal({
 function BrokerSettingsRow({
   display, includeBrokerage, includeTaxes,
   onOpenEdit, onToggleBrokerage, onToggleTaxes,
+  totalMtm, onMtmClick, onAnalysisClick, onReplayClick,
+  brokerageTotal, taxAgg, brokerageRate, brokerageRateType, onBrokerageRateChange, onBrokerageRateTypeChange,
+  marginBlocked, netDebitCredit,
 }: {
   display: BsDisplay;
   includeBrokerage: boolean;
@@ -705,7 +788,31 @@ function BrokerSettingsRow({
   onOpenEdit: () => void;
   onToggleBrokerage: (v: boolean) => void;
   onToggleTaxes: (v: boolean) => void;
+  totalMtm: number;
+  onMtmClick: () => void;
+  onAnalysisClick?: () => void;
+  onReplayClick?: () => void;
+  brokerageTotal: number;
+  taxAgg: TaxBucket;
+  brokerageRate: number;
+  brokerageRateType: "per_order" | "per_lot";
+  onBrokerageRateChange: (v: number) => void;
+  onBrokerageRateTypeChange: (v: "per_order" | "per_lot") => void;
+  marginBlocked?: number | null;
+  netDebitCredit?: number;
 }) {
+  const [showBrokerageEdit, setShowBrokerageEdit] = useState(false);
+  const [taxTooltipOpen, setTaxTooltipOpen] = useState(false);
+  const brokeragePopupRef = useRef<HTMLDivElement>(null);
+
+  useEffect(() => {
+    function handleOutside(e: MouseEvent) {
+      if (brokeragePopupRef.current && !brokeragePopupRef.current.contains(e.target as Node)) setShowBrokerageEdit(false);
+    }
+    if (showBrokerageEdit) document.addEventListener("mousedown", handleOutside);
+    return () => document.removeEventListener("mousedown", handleOutside);
+  }, [showBrokerageEdit]);
+
   function trailingLabel() {
     return display.trailing || "-";
   }
@@ -713,7 +820,7 @@ function BrokerSettingsRow({
   return (
     <div className="flex flex-wrap items-stretch justify-between gap-6 w-full px-5 py-4 mb-5 bg-white rounded-xl border border-[#e5e7eb] shadow-[0_2px_8px_0_rgba(16,24,40,0.07)]">
       {/* Main — Broker Settings card */}
-      <div className="flex-1 min-w-[320px]">
+      <div className="shrink-0">
         <div className="flex flex-col gap-3">
           <div className="flex items-center gap-1.5 pb-2.5 border-b border-[#ececec]">
             <p className="text-[18px] font-medium leading-tight tracking-tight text-[#1f2937]">Broker Settings</p>
@@ -742,37 +849,131 @@ function BrokerSettingsRow({
         </div>
       </div>
 
+      {/* Centre — Total MTM + icons */}
+      <div className="flex flex-1 items-center gap-4 border-x border-[#ececec] px-6">
+        <div className="flex items-center gap-2">
+          <svg xmlns="http://www.w3.org/2000/svg" fill="none" viewBox="0 0 24 24" stroke="currentColor" strokeWidth={2} className="w-4 h-4 text-[#6b7280] shrink-0">
+            <path strokeLinecap="round" strokeLinejoin="round" d="M4 6h16M4 12h16M4 18h16" />
+          </svg>
+          <span className="text-[14px] font-semibold text-[#1f2937]">Total MTM</span>
+        </div>
+        <span className="text-[15px] font-bold tabular-nums whitespace-nowrap" style={{ color: totalMtm >= 0 ? "#16a34a" : "#ef4444" }}>
+          {fmtMoney(totalMtm)}
+        </span>
+        <div className="flex items-center gap-1">
+          <button type="button" title="MTM" onClick={onMtmClick} className="w-8 h-8 flex items-center justify-center rounded-md hover:bg-[#f3f4f6] transition-colors">
+            <svg xmlns="http://www.w3.org/2000/svg" width="18" height="18" fill="#4b5563" viewBox="0 0 16 16">
+              <path fillRule="evenodd" d="M0 0h1v15h15v1H0zm10 3.5a.5.5 0 0 1 .5-.5h4a.5.5 0 0 1 .5.5v4a.5.5 0 0 1-1 0V4.9l-3.613 4.417a.5.5 0 0 1-.74.037L7.06 6.767l-3.656 5.027a.5.5 0 0 1-.808-.588l4-5.5a.5.5 0 0 1 .758-.06l2.609 2.61L13.445 4H10.5a.5.5 0 0 1-.5-.5"/>
+            </svg>
+          </button>
+          <button type="button" title="Analysis" onClick={onAnalysisClick} className="w-8 h-8 flex items-center justify-center rounded-md hover:bg-[#f3f4f6] transition-colors">
+            <svg width="18" height="18" viewBox="0 0 16 16" fill="none" xmlns="http://www.w3.org/2000/svg">
+              <path d="M1.334 1.333V12.666c0 1.107.893 2 2 2H14.667" stroke="#4b5563" strokeWidth="1" strokeMiterlimit="10" strokeLinecap="round" strokeLinejoin="round"/>
+              <path d="M13.932 7.171L11.255 3.696a1 1 0 0 0-1.585.298L7.612 5.113a1 1 0 0 1-1.586-.19L4.572 2.714" stroke="#4b5563" strokeWidth="1" strokeLinecap="round" strokeLinejoin="round"/>
+              <path d="M13.932 12.457L11.255 8.982a1 1 0 0 0-1.585.298L7.612 10.4a1 1 0 0 1-1.586-.19L4.572 8" stroke="#4b5563" strokeWidth="1" strokeLinecap="round" strokeLinejoin="round"/>
+            </svg>
+          </button>
+          <button type="button" title="Replay" onClick={onReplayClick} className="w-8 h-8 flex items-center justify-center rounded-md hover:bg-[#f3f4f6] transition-colors">
+            <svg width="18" height="18" viewBox="0 0 24 24" fill="none" xmlns="http://www.w3.org/2000/svg">
+              <path d="M12 20.75a7.25 7.25 0 0 1-7.25-7.25.75.75 0 0 1 1.5 0A5.75 5.75 0 1 0 12 7.75H9.5a.75.75 0 0 1 0-1.5H12a7.25 7.25 0 0 1 0 14.5Z" fill="#4b5563"/>
+              <path d="M12 10.75a.75.75 0 0 1-.53-.22l-3-3a.75.75 0 0 1 1.06-1.06L12 9.94l2.47-2.47a.75.75 0 1 1 1.06 1.06l-3 3a.75.75 0 0 1-.53.22Z" fill="#4b5563"/>
+            </svg>
+          </button>
+        </div>
+      </div>
+
       {/* Side — toggles + metrics */}
       <div className="flex items-center gap-7 flex-wrap py-1">
         {/* Include Brokerage */}
-        <div className="flex flex-col gap-2">
+        <div className="flex flex-col gap-1">
           <div className="flex items-center gap-2">
-            <label htmlFor="bs-brokerage-toggle" className="text-[13px] font-semibold text-[#1f2937]">Include Brokerage</label>
+            <span className="text-[13px] font-semibold text-[#1f2937]">Include Brokerage</span>
             <ToggleSwitch id="bs-brokerage-toggle" checked={includeBrokerage} onChange={onToggleBrokerage} />
           </div>
-          <div className={`flex items-center gap-2 px-1 py-1 text-[#6b7280] ${includeBrokerage ? "" : "opacity-50 pointer-events-none"}`}>
-            <span className="text-[15px] font-medium">0</span>
+          <div className="relative flex items-center gap-1.5">
+            <span className={`text-sm font-medium ${includeBrokerage ? "text-gray-800" : "text-gray-400"}`}>
+              {fmtMoney(brokerageTotal)}
+            </span>
+            {includeBrokerage && (
+              <button type="button" onClick={() => setShowBrokerageEdit(v => !v)}
+                className="text-gray-400 hover:text-gray-600">
+                <svg xmlns="http://www.w3.org/2000/svg" viewBox="0 0 16 16" fill="currentColor" className="h-3.5 w-3.5">
+                  <path d="M13.488 2.513a1.75 1.75 0 0 0-2.475 0L6.75 6.774a2.75 2.75 0 0 0-.718 1.272l-.351 1.406a.75.75 0 0 0 .913.913l1.406-.351a2.75 2.75 0 0 0 1.272-.718l4.261-4.263a1.75 1.75 0 0 0 0-2.475ZM3.75 12.5a.75.75 0 0 0 0 1.5h8.5a.75.75 0 0 0 0-1.5h-8.5Z" />
+                </svg>
+              </button>
+            )}
+            {showBrokerageEdit && (
+              <div ref={brokeragePopupRef} className="absolute top-full left-0 z-50 mt-2 w-max rounded-xl border border-gray-200 bg-white p-3 shadow-lg">
+                <p className="mb-2.5 text-xs font-semibold text-gray-800">Brokerage</p>
+                <div className="flex items-center gap-2">
+                  <input type="number" min={0} value={brokerageRate}
+                    onChange={e => onBrokerageRateChange(Math.max(0, Number(e.target.value)))}
+                    className="w-20 rounded border border-gray-200 bg-white px-2.5 py-1.5 text-sm text-gray-800 focus:border-secondary-500 focus:outline-none" />
+                  <select value={brokerageRateType} onChange={e => onBrokerageRateTypeChange(e.target.value as "per_order" | "per_lot")}
+                    className="rounded border border-gray-200 bg-white px-2 py-1.5 text-sm text-gray-800 focus:border-secondary-500 focus:outline-none">
+                    <option value="per_order">per order</option>
+                    <option value="per_lot">per lot</option>
+                  </select>
+                  <button type="button" onClick={() => setShowBrokerageEdit(false)}
+                    className="rounded-lg bg-secondary-500 px-3 py-1.5 text-sm font-medium text-white hover:bg-secondary-600 transition-colors">
+                    Done
+                  </button>
+                </div>
+              </div>
+            )}
           </div>
         </div>
 
         {/* Taxes & charges */}
-        <div className="flex flex-col gap-2">
+        <div className="flex flex-col gap-1">
           <div className="flex items-center gap-2">
-            <label htmlFor="bs-taxes-toggle" className="text-[13px] font-semibold text-[#1f2937]">Taxes &amp; charges</label>
+            <span className="text-[13px] font-semibold text-[#1f2937]">Taxes &amp; charges</span>
             <ToggleSwitch id="bs-taxes-toggle" checked={includeTaxes} onChange={onToggleTaxes} />
           </div>
-          <div className={`flex items-center gap-2 px-1 py-1 text-[#6b7280] ${includeTaxes ? "" : "opacity-50 pointer-events-none"}`}>
-            <span className="text-[15px] font-medium">₹ 0</span>
-            <svg xmlns="http://www.w3.org/2000/svg" fill="none" viewBox="0 0 24 24" stroke="currentColor" strokeWidth={2} className="w-3 h-3 text-[#9ca3af]">
-              <path strokeLinecap="round" strokeLinejoin="round" d="M19 9l-7 7-7-7" />
-            </svg>
+          <div className="relative flex items-center gap-1.5">
+            <span className={`text-sm font-medium ${includeTaxes ? "text-gray-800" : "text-gray-400"}`}>
+              {fmtMoney(taxAgg.total)}
+            </span>
+            {includeTaxes && (
+              <button type="button" onMouseEnter={() => setTaxTooltipOpen(true)} onMouseLeave={() => setTaxTooltipOpen(false)}
+                className="text-gray-400 hover:text-gray-600">
+                <svg xmlns="http://www.w3.org/2000/svg" viewBox="0 0 16 16" fill="currentColor" className="h-3.5 w-3.5">
+                  <path d="M13.488 2.513a1.75 1.75 0 0 0-2.475 0L6.75 6.774a2.75 2.75 0 0 0-.718 1.272l-.351 1.406a.75.75 0 0 0 .913.913l1.406-.351a2.75 2.75 0 0 0 1.272-.718l4.261-4.263a1.75 1.75 0 0 0 0-2.475ZM3.75 12.5a.75.75 0 0 0 0 1.5h8.5a.75.75 0 0 0 0-1.5h-8.5Z" />
+                </svg>
+              </button>
+            )}
+            {taxTooltipOpen && includeTaxes && (
+              <div className="absolute top-full left-0 z-50 mt-2 w-52 rounded-xl border border-gray-200 bg-white p-3 shadow-lg">
+                <p className="mb-2 text-xs font-semibold text-gray-800">Taxes &amp; charges</p>
+                <div className="space-y-1.5 text-xs text-gray-500">
+                  {([
+                    { label: "STT", val: taxAgg.stt },
+                    { label: "Exchange transaction charges", val: taxAgg.exchange },
+                    { label: "Stamp charges", val: taxAgg.stamp },
+                    { label: "SEBI turnover fees", val: taxAgg.sebi },
+                    { label: "GST", val: taxAgg.gst },
+                  ] as { label: string; val: number }[]).map(({ label, val }) => (
+                    <div key={label} className="flex items-center justify-between gap-2">
+                      <span>{label}</span>
+                      <span className="whitespace-nowrap font-medium text-gray-700">{fmtMoney(val)}</span>
+                    </div>
+                  ))}
+                  <div className="flex items-center justify-between gap-2 border-t border-gray-100 pt-1.5">
+                    <span className="font-semibold text-gray-800">Total</span>
+                    <span className="whitespace-nowrap font-semibold text-gray-800">{fmtMoney(taxAgg.total)}</span>
+                  </div>
+                </div>
+              </div>
+            )}
           </div>
         </div>
 
         {/* Margin Blocked */}
         <div className="flex flex-col justify-center gap-2.5">
           <span className="text-[13px] text-[#6b7280]">Margin Blocked&nbsp;(approx)</span>
-          <span className="text-[15px] font-medium text-[#1f2937] tabular-nums">₹ 0</span>
+          <span className="text-[15px] font-medium text-[#1f2937] tabular-nums">
+            {marginBlocked != null ? fmtMoney(marginBlocked) : "₹ 0"}
+          </span>
         </div>
 
         {/* Net Debit/Credit */}
@@ -785,7 +986,9 @@ function BrokerSettingsRow({
               </svg>
             </span>
           </span>
-          <span className="text-[15px] font-medium text-[#1f2937] tabular-nums">₹ 0</span>
+          <span className="text-[15px] font-medium text-[#1f2937] tabular-nums">
+            {netDebitCredit != null ? fmtMoney(netDebitCredit) : "₹ 0"}
+          </span>
         </div>
       </div>
     </div>
@@ -795,7 +998,6 @@ function BrokerSettingsRow({
 // ─── Main component ───────────────────────────────────────────────────────────
 
 export default function AlgoBacktest() {
-  const navigate = useNavigate();
   const [groups, setGroups] = useState<Group[]>([]);
   const [expandedGroups, setExpandedGroups] = useState<Set<string>>(new Set());
   const [expandedDetails, setExpandedDetails] = useState<Set<string>>(new Set());
@@ -813,9 +1015,79 @@ export default function AlgoBacktest() {
   const [bsModal, setBsModal] = useState<BsModalState>(DEFAULT_MODAL);
   const [bsSaving, setBsSaving] = useState(false);
   const [bsLoadingModal, setBsLoadingModal] = useState(false);
+  // mtm graph
+  const [mtmGraphOpen, setMtmGraphOpen] = useState(false);
+  const [mtmGraphData, setMtmGraphData] = useState<Record<string, MtmHistoricalEntry> | null>(null);
+  const [mtmGraphLoading, setMtmGraphLoading] = useState(false);
+  const [mtmGraphError, setMtmGraphError] = useState("");
+  const [mtmHoverIdx, setMtmHoverIdx] = useState<number | null>(null);
+  const [mtmGraphLegs, setMtmGraphLegs] = useState<Leg[]>([]);
+  const [mtmGraphCurrentMtm, setMtmGraphCurrentMtm] = useState<number>(0);
+  const mtmSvgRef = useRef<SVGSVGElement>(null);
   const [selectedBrokerEntry, setSelectedBrokerEntry] = useState<BrokerEntry | null>(null);
   const [includeBrokerage, setIncludeBrokerage] = useState(false);
   const [includeTaxes, setIncludeTaxes] = useState(false);
+  const [brokerageRate, setBrokerageRate] = useState(0);
+  const [brokerageRateType, setBrokerageRateType] = useState<"per_order" | "per_lot">("per_order");
+
+  const chargeTrades = useMemo(() => buildAllChargeTrades(groups.flatMap(g => g.items)), [groups]);
+  const brokerageTotal = useMemo(() => includeBrokerage ? calcBtBrokerage(chargeTrades, brokerageRate, brokerageRateType) : 0, [includeBrokerage, chargeTrades, brokerageRate, brokerageRateType]);
+  const taxAgg = useMemo(() => includeTaxes ? calcBtTaxes(chargeTrades) : ZERO_TAX, [includeTaxes, chargeTrades]);
+
+  const [marginBlocked, setMarginBlocked] = useState<number | null>(null);
+  const marginTimerRef = useRef<ReturnType<typeof setTimeout> | null>(null);
+
+  const netDebitCredit = useMemo(() => {
+    return groups.flatMap(g => g.items).reduce((total, rec) => {
+      const openLegs = (rec.legs ?? []).filter(l => l && Number(l.status) === 1);
+      return openLegs.reduce((s, leg) => {
+        const ePrice = Number(leg.entry_trade?.price ?? leg.entry_trade?.trigger_price ?? 0) || 0;
+        const qty = (Number(leg.quantity) || 0) * (Number(leg.lot_size) || 1);
+        const isSell = String(leg.position ?? "").toLowerCase().includes("sell");
+        return isSell ? s + ePrice * qty : s - ePrice * qty;
+      }, total);
+    }, 0);
+  }, [groups]);
+
+  // Reads from currentRecordsRef directly so it uses the latest data
+  // immediately after execute-orders updates it (no React state lag)
+  const recalcMargin = useCallback(() => {
+    const ltpMap = ltpSnapshotMapRef.current;
+    const positions: SpanPos[] = currentRecordsRef.current.flatMap(rec => {
+      const underlying = String(rec.ticker ?? rec.portfolio?.portfolio ?? "").trim()
+        .replace(/\s+\d+$/, "").trim().toUpperCase() || "NIFTY";
+      const spotLtp = Number((ltpMap["spot:" + underlying] ?? ltpMap["spot:" + underlying.toLowerCase()])?.ltp ?? 0);
+      return (rec.legs ?? [])
+        .filter(l => l && Number(l.status) === 1)
+        .filter(l => Number(l.strike) > 0 && (l.expiry_date || l.expiry))
+        .map(leg => {
+          const _rawLtp = resolveLegLtp(leg, ltpMap);
+          const liveLtp = _rawLtp != null ? _rawLtp : (Number(leg.last_saw_price ?? leg.mark_price ?? leg.entry_trade?.price ?? 0) || 0);
+          return {
+            underlying,
+            instrument_type: String(leg.option ?? leg.option_type ?? "CE").toUpperCase(),
+            expiry: String(leg.expiry_date ?? leg.expiry ?? "").trim(),
+            strike: Number(leg.strike),
+            transaction_type: String(leg.position ?? "sell").toLowerCase().includes("sell") ? "SELL" : "BUY",
+            quantity: Number(leg.quantity) || 1,
+            lot_size: Number(leg.lot_size) || 1,
+            ltp: liveLtp,
+            spot: spotLtp,
+          } as SpanPos;
+        });
+    });
+    if (!positions.length) { setMarginBlocked(null); return; }
+    console.log("[MARGIN][Backtest] positions:", JSON.parse(JSON.stringify(positions)));
+    const result = calculateMargin(positions);
+    console.log("[MARGIN][Backtest] result:", JSON.parse(JSON.stringify(result)));
+    setMarginBlocked(result.net_margin > 0 ? result.net_margin : null);
+  }, []);
+
+  const scheduleMarginCalc = useCallback(() => {
+    if (marginTimerRef.current) clearTimeout(marginTimerRef.current);
+    marginTimerRef.current = setTimeout(recalcMargin, 500);
+  }, [recalcMargin]);
+
   // control bar
   const [autoload, setAutoload] = useState(false);
   const [autoplay, setAutoplay] = useState(false);
@@ -1071,7 +1343,8 @@ export default function AlgoBacktest() {
     }
     if (needFull) { buildBrokerStaticMap(currentRecordsRef.current); setGroups(groupRecords(currentRecordsRef.current)); }
     scheduleMtmRefresh();
-  }, [buildBrokerStaticMap, scheduleMtmRefresh]);
+    if (type === "execute_order") scheduleMarginCalc();
+  }, [buildBrokerStaticMap, scheduleMtmRefresh, scheduleMarginCalc]);
 
   // ── process update/ltp message ─────────────────────────────────────────────
   const processUpd = useCallback((payload: Record<string, unknown>) => {
@@ -1083,7 +1356,8 @@ export default function AlgoBacktest() {
       if (Array.isArray(d.instrument_ltp)) mergeLtpItems(d.instrument_ltp as LtpItem[], ltpSnapshotMapRef.current);
       const ts = String(d.listen_timestamp ?? d.listen_time ?? "").trim();
       if (ts) latestListenTsRef.current = ts;
-      scheduleMtmRefresh(); return;
+      scheduleMtmRefresh();
+      return;
     }
     if (type === "update") {
       const positions = ((payload.data as Record<string, unknown>)?.open_positions as Array<Record<string, unknown>>) ?? [];
@@ -1097,7 +1371,7 @@ export default function AlgoBacktest() {
       }
       scheduleMtmRefresh();
     }
-  }, [scheduleMtmRefresh]);
+  }, [scheduleMtmRefresh, scheduleMarginCalc]);
 
   // ── keep latest handlers in refs so socket callbacks never go stale ───────
   const processExecOrdsRef = useRef(processExecOrds);
@@ -1245,6 +1519,30 @@ export default function AlgoBacktest() {
     setBsModalOpen(true);
   }, [selectedBrokerEntry, brokerEntries]);
 
+  const handleMtmGraph = useCallback(async (legs: Leg[], currentMtm: number = 0) => {
+    const tokens = [...new Set(legs.map(l => String(l.token ?? "").trim()).filter(Boolean))];
+    if (tokens.length === 0) return;
+    setMtmGraphLegs(legs);
+    setMtmGraphCurrentMtm(currentMtm);
+    const candle = `${listenDateRef.current}T${listenTimeRef.current}`;
+    setMtmGraphOpen(true);
+    setMtmGraphLoading(true);
+    setMtmGraphError("");
+    setMtmGraphData(null);
+    try {
+      const base = String(API_BASE || "").replace(/\/+$/, "");
+      const url = `${base}/mtm/historical-data?tokens=${encodeURIComponent(tokens.join(","))}&candle=${encodeURIComponent(candle)}&activation_mode=algo-backtest`;
+      const res = await fetch(url);
+      if (!res.ok) throw new Error(`API error ${res.status}`);
+      const data: Record<string, MtmHistoricalEntry> = await res.json();
+      setMtmGraphData(data);
+    } catch (e: unknown) {
+      setMtmGraphError(e instanceof Error ? e.message : "Failed to load MTM graph data");
+    } finally {
+      setMtmGraphLoading(false);
+    }
+  }, [listenDateRef, listenTimeRef]);
+
   function syncBsDisplay(m: BsModalState, settings?: { StopLoss?: number | null; Target?: number | null; LockAndTrail?: unknown; OverallTrailSL?: unknown }) {
     const sl = settings ? settings.StopLoss ?? null : (m.stopLossOpen ? m.stopLoss : null);
     const tgt = settings ? settings.Target ?? null : (m.targetOpen ? m.target : null);
@@ -1375,10 +1673,167 @@ export default function AlgoBacktest() {
     });
   })();
 
+  const MtmIcons = ({ legs, currentMtm = 0, navUrl, replayUrl }: { legs: Leg[]; currentMtm?: number; navUrl?: string; replayUrl?: string }) => (
+    <div className="flex items-center gap-1" onClick={e => e.stopPropagation()}>
+      <button type="button" title="MTM Graph" onClick={() => handleMtmGraph(legs, currentMtm)}
+        className="w-7 h-7 flex items-center justify-center rounded hover:bg-[#f3f4f6] transition-colors">
+        <svg xmlns="http://www.w3.org/2000/svg" width="15" height="15" fill="#4b5563" viewBox="0 0 16 16">
+          <path fillRule="evenodd" d="M0 0h1v15h15v1H0zm10 3.5a.5.5 0 0 1 .5-.5h4a.5.5 0 0 1 .5.5v4a.5.5 0 0 1-1 0V4.9l-3.613 4.417a.5.5 0 0 1-.74.037L7.06 6.767l-3.656 5.027a.5.5 0 0 1-.808-.588l4-5.5a.5.5 0 0 1 .758-.06l2.609 2.61L13.445 4H10.5a.5.5 0 0 1-.5-.5"/>
+        </svg>
+      </button>
+      <button type="button" title="Analysis" onClick={() => navUrl && window.open(navUrl, "_blank")}
+        className="w-7 h-7 flex items-center justify-center rounded hover:bg-[#f3f4f6] transition-colors">
+        <svg width="15" height="15" viewBox="0 0 16 16" fill="none" xmlns="http://www.w3.org/2000/svg">
+          <path d="M1.334 1.333V12.666c0 1.107.893 2 2 2H14.667" stroke="#4b5563" strokeWidth="1" strokeMiterlimit="10" strokeLinecap="round" strokeLinejoin="round"/>
+          <path d="M13.932 7.171L11.255 3.696a1 1 0 0 0-1.585.298L7.612 5.113a1 1 0 0 1-1.586-.19L4.572 2.714" stroke="#4b5563" strokeWidth="1" strokeLinecap="round" strokeLinejoin="round"/>
+          <path d="M13.932 12.457L11.255 8.982a1 1 0 0 0-1.585.298L7.612 10.4a1 1 0 0 1-1.586-.19L4.572 8" stroke="#4b5563" strokeWidth="1" strokeLinecap="round" strokeLinejoin="round"/>
+        </svg>
+      </button>
+      <button type="button" title="Replay" onClick={() => replayUrl && window.open(replayUrl, "_blank")}
+        className="w-7 h-7 flex items-center justify-center rounded hover:bg-[#f3f4f6] transition-colors">
+        <svg width="15" height="15" viewBox="0 0 24 24" fill="none" xmlns="http://www.w3.org/2000/svg">
+          <path d="M12 20.75a7.25 7.25 0 0 1-7.25-7.25.75.75 0 0 1 1.5 0A5.75 5.75 0 1 0 12 7.75H9.5a.75.75 0 0 1 0-1.5H12a7.25 7.25 0 0 1 0 14.5Z" fill="#4b5563"/>
+          <path d="M12 10.75a.75.75 0 0 1-.53-.22l-3-3a.75.75 0 0 1 1.06-1.06L12 9.94l2.47-2.47a.75.75 0 1 1 1.06 1.06l-3 3a.75.75 0 0 1-.53.22Z" fill="#4b5563"/>
+        </svg>
+      </button>
+    </div>
+  );
+
   // ─── Render ────────────────────────────────────────────────────────────────
   return (
     <>
       <PageMeta title="Backtest | Algo Trade" description="Algo backtest portfolios" />
+
+      {/* MTM Historical Graph Modal */}
+      {mtmGraphOpen && (() => {
+        const allLegs = mtmGraphLegs;
+        const hist = mtmGraphData ?? {};
+        const tsSet = new Set<string>();
+        for (const e of Object.values(hist)) e.timestamp.forEach(t => tsSet.add(t));
+        const timestamps = [...tsSet].sort();
+        const closeAt: Record<string, Record<string, number>> = {};
+        for (const [tk, e] of Object.entries(hist)) {
+          closeAt[tk] = {};
+          e.timestamp.forEach((t, i) => { closeAt[tk][t] = e.close[i]; });
+        }
+        const mtmValues = timestamps.map(ts => {
+          let total = 0;
+          for (const leg of allLegs) {
+            const tk = String(leg.token ?? "").trim();
+            if (!tk || !closeAt[tk]) continue;
+            const entryTs = (leg.entry_trade?.traded_timestamp ?? leg.entry_trade?.trigger_timestamp ?? "").slice(0, 19);
+            const exitTs  = (leg.exit_trade?.traded_timestamp  ?? leg.exit_trade?.trigger_timestamp  ?? "").slice(0, 19);
+            if (entryTs && ts < entryTs) continue;
+            const entryPx = Number(leg.entry_trade?.price ?? 0);
+            const exitPx  = Number(leg.exit_trade?.price  ?? 0);
+            const qty     = (Number(leg.quantity) || 0) * (Number(leg.lot_size) || 1);
+            const isSell  = String(leg.position ?? "").toLowerCase().includes("sell");
+            if (!entryPx || !qty) continue;
+            const curPx = (exitTs && ts >= exitTs && exitPx > 0) ? exitPx : (closeAt[tk][ts] ?? 0);
+            if (!curPx) continue;
+            total += isSell ? (entryPx - curPx) * qty : (curPx - entryPx) * qty;
+          }
+          return total;
+        });
+        const isUp = mtmGraphCurrentMtm >= 0;
+        const minMtm  = Math.min(...mtmValues, 0);
+        const maxMtm  = Math.max(...mtmValues, 0);
+        const range   = maxMtm - minMtm || 1;
+        const W = 700, H = 220, PL = 72, PR = 16, PT = 20, PB = 28;
+        const plotW = W - PL - PR, plotH = H - PT - PB, n = timestamps.length;
+        const toX = (i: number) => PL + (i / Math.max(n - 1, 1)) * plotW;
+        const toY = (v: number) => PT + (1 - (v - minMtm) / range) * plotH;
+        const zeroY = toY(0);
+        const linePoints = mtmValues.map((v, i) => `${toX(i).toFixed(1)},${toY(v).toFixed(1)}`).join(" ");
+        const fillPath = n > 0
+          ? `M${toX(0).toFixed(1)},${zeroY.toFixed(1)} ` +
+            mtmValues.map((v, i) => `L${toX(i).toFixed(1)},${toY(v).toFixed(1)}`).join(" ") +
+            ` L${toX(n - 1).toFixed(1)},${zeroY.toFixed(1)} Z`
+          : "";
+        const fmtMtmV = (v: number) => {
+          const abs = Math.abs(v), s = v < 0 ? "-" : "";
+          if (abs >= 1e5) return `${s}${(abs / 1e5).toFixed(1)}L`;
+          if (abs >= 1e3) return `${s}${(abs / 1e3).toFixed(1)}K`;
+          return v.toFixed(0);
+        };
+        const xTicks = n <= 7 ? mtmValues.map((_, i) => i) : [0, Math.floor(n * 0.25), Math.floor(n * 0.5), Math.floor(n * 0.75), n - 1];
+        return (
+          <div className="fixed inset-0 z-50 flex items-center justify-center bg-black/50 px-4">
+            <div className="relative w-full max-w-3xl rounded-2xl border border-gray-200 bg-white p-6 shadow-xl">
+              <div className="mb-4 flex items-center justify-between">
+                <div className="flex items-center gap-3">
+                  <span className="text-base font-semibold text-gray-800">Today's MTM Graph</span>
+                  <span className={`text-sm font-bold tabular-nums ${isUp ? "text-green-600" : "text-red-500"}`}>
+                    {fmtMoney(mtmGraphCurrentMtm)}
+                  </span>
+                </div>
+                <button type="button" onClick={() => { setMtmGraphOpen(false); setMtmHoverIdx(null); }}
+                  className="rounded-lg p-1 text-gray-400 hover:bg-gray-100 hover:text-gray-600">
+                  <svg xmlns="http://www.w3.org/2000/svg" fill="none" viewBox="0 0 24 24" strokeWidth={2} stroke="currentColor" className="h-5 w-5">
+                    <path strokeLinecap="round" strokeLinejoin="round" d="M6 18L18 6M6 6l12 12" />
+                  </svg>
+                </button>
+              </div>
+              {mtmGraphLoading && (
+                <div className="flex items-center justify-center py-16 text-gray-500">
+                  <span className="mr-2 h-5 w-5 animate-spin rounded-full border-2 border-blue-500 border-t-transparent" />
+                  Loading historical data…
+                </div>
+              )}
+              {mtmGraphError && !mtmGraphLoading && (
+                <div className="rounded border border-red-200 bg-red-50 px-4 py-3 text-sm text-red-600">{mtmGraphError}</div>
+              )}
+              {!mtmGraphLoading && !mtmGraphError && (
+                n === 0
+                  ? <div className="py-10 text-center text-sm text-gray-400">No historical data found for active tokens.</div>
+                  : (() => {
+                      const hi = mtmHoverIdx;
+                      const hx = hi !== null ? toX(hi) : null;
+                      const hy = hi !== null ? toY(mtmValues[hi]) : null;
+                      const hMtm = hi !== null ? mtmValues[hi] : null;
+                      const hTs  = hi !== null ? timestamps[hi] : null;
+                      const hIsUp = hMtm !== null ? hMtm >= 0 : isUp;
+                      const tipX = hx !== null ? (hx > W - PL - 80 ? hx - 110 : hx + 10) : 0;
+                      const handleMouseMove = (e: React.MouseEvent<SVGSVGElement>) => {
+                        const svg = mtmSvgRef.current;
+                        if (!svg || n === 0) return;
+                        const rect = svg.getBoundingClientRect();
+                        const svgX = ((e.clientX - rect.left) / rect.width) * W;
+                        const idx = Math.round(((svgX - PL) / plotW) * (n - 1));
+                        setMtmHoverIdx(Math.max(0, Math.min(n - 1, idx)));
+                      };
+                      return (
+                        <svg ref={mtmSvgRef} viewBox={`0 0 ${W} ${H}`} className="w-full cursor-crosshair" style={{ height: 260 }}
+                          onMouseMove={handleMouseMove} onMouseLeave={() => setMtmHoverIdx(null)}>
+                          <defs><clipPath id="bt-plot-clip"><rect x={PL} y={PT} width={plotW} height={plotH} /></clipPath></defs>
+                          <line x1={PL} y1={zeroY} x2={W - PR} y2={zeroY} stroke="#d1d5db" strokeWidth="1" strokeDasharray="4,3" />
+                          {fillPath && <path d={fillPath} clipPath="url(#bt-plot-clip)" fill={isUp ? "rgba(22,163,74,0.12)" : "rgba(239,68,68,0.15)"} />}
+                          <polyline points={linePoints} clipPath="url(#bt-plot-clip)" fill="none" stroke="#2563eb" strokeWidth="1.8" strokeLinejoin="round" strokeLinecap="round" />
+                          {[maxMtm, 0, minMtm].map((v, i) => (
+                            <text key={i} x={PL - 6} y={toY(v) + 4} textAnchor="end" fontSize="10" fill="#9ca3af">{fmtMtmV(v)}</text>
+                          ))}
+                          {xTicks.map(i => (
+                            <text key={i} x={toX(i)} y={H - 6} textAnchor="middle" fontSize="10" fill="#9ca3af">{timestamps[i]?.slice(11, 16)}</text>
+                          ))}
+                          <line x1={PL} y1={PT} x2={PL} y2={PT + plotH} stroke="#e5e7eb" strokeWidth="1" />
+                          <line x1={PL} y1={PT + plotH} x2={W - PR} y2={PT + plotH} stroke="#e5e7eb" strokeWidth="1" />
+                          {hx !== null && hy !== null && hMtm !== null && hTs && (
+                            <>
+                              <line x1={hx} y1={PT} x2={hx} y2={PT + plotH} stroke="#94a3b8" strokeWidth="1" strokeDasharray="3,2" />
+                              <circle cx={hx} cy={hy} r={4} fill="#2563eb" stroke="#fff" strokeWidth="1.5" />
+                              <rect x={tipX} y={hy - 30} width={100} height={38} rx={5} fill="white" stroke="#e2e8f0" strokeWidth="1" filter="drop-shadow(0 1px 3px rgba(0,0,0,0.12))" />
+                              <text x={tipX + 8} y={hy - 14} fontSize="10" fill="#64748b">{hTs.slice(11, 16)}</text>
+                              <text x={tipX + 8} y={hy + 2} fontSize="11" fontWeight="600" fill={hIsUp ? "#16a34a" : "#ef4444"}>{hIsUp ? "+" : ""}{hMtm.toFixed(0)}</text>
+                            </>
+                          )}
+                        </svg>
+                      );
+                    })()
+              )}
+            </div>
+          </div>
+        );
+      })()}
       <div className="flex h-full min-h-screen">
 
         {/* ── Sidebar ─────────────────────────────────────────────────── */}
@@ -1542,14 +1997,31 @@ export default function AlgoBacktest() {
           </div>
 
           {/* Broker Settings Row */}
-          <BrokerSettingsRow
-            display={bsDisplay}
-            includeBrokerage={includeBrokerage}
-            includeTaxes={includeTaxes}
-            onOpenEdit={openBrokerSettings}
-            onToggleBrokerage={setIncludeBrokerage}
-            onToggleTaxes={setIncludeTaxes}
-          />
+          {(() => {
+            const allItems = groups.flatMap(g => g.items);
+            return (
+              <BrokerSettingsRow
+                display={bsDisplay}
+                includeBrokerage={includeBrokerage}
+                includeTaxes={includeTaxes}
+                onOpenEdit={openBrokerSettings}
+                onToggleBrokerage={setIncludeBrokerage}
+                onToggleTaxes={setIncludeTaxes}
+                totalMtm={allItems.reduce((s, i) => s + (pnlMap[i._id] ?? 0), 0)}
+                onMtmClick={() => handleMtmGraph(allItems.flatMap(i => i.legs ?? []), allItems.reduce((s, i) => s + (pnlMap[i._id] ?? 0), 0))}
+                onAnalysisClick={() => { const pid = groups[0]?.portfolio_id; if (pid) window.open(`/analyse/portfolio/${encodeURIComponent(pid)}`, "_blank"); }}
+                onReplayClick={() => { const pid = groups[0]?.portfolio_id; if (pid) window.open(`/replay/portfolio/${encodeURIComponent(pid)}`, "_blank"); }}
+                brokerageTotal={brokerageTotal}
+                taxAgg={taxAgg}
+                brokerageRate={brokerageRate}
+                brokerageRateType={brokerageRateType}
+                onBrokerageRateChange={setBrokerageRate}
+                onBrokerageRateTypeChange={setBrokerageRateType}
+                marginBlocked={marginBlocked}
+                netDebitCredit={netDebitCredit}
+              />
+            );
+          })()}
           <BrokerSettingsModal
             open={bsModalOpen}
             brokerName={(selectedBrokerEntry ?? brokerEntries[0])?.label ?? ""}
@@ -1606,8 +2078,10 @@ export default function AlgoBacktest() {
                       <div><StatusBadge text={`${pStatus.text} ${activeCount}/${group.items.length}`} cls={pStatus.cls} /></div>
                       <div className="text-[14px] font-bold whitespace-nowrap tabular-nums" style={{ color: gPnl >= 0 ? "#16a34a" : "#ef4444" }}>{fmtMoney(gPnl)}</div>
                       {/* Group actions — visible on hover only */}
-                      <div className="flex justify-end gap-2 opacity-0 group-hover:opacity-100 pointer-events-none group-hover:pointer-events-auto transition-opacity duration-150"
+                      <div className="flex justify-end items-center gap-2 opacity-0 group-hover:opacity-100 pointer-events-none group-hover:pointer-events-auto transition-opacity duration-150"
                         onClick={e => e.stopPropagation()}>
+                        <MtmIcons legs={group.items.flatMap(i => i.legs ?? [])} currentMtm={gPnl} navUrl={`/analyse/group/${encodeURIComponent(gid)}`} replayUrl={`/replay/group/${encodeURIComponent(gid)}`} />
+                        <div className="w-px h-5 bg-[#e5e7eb]" />
                         {activeCount > 0 && (
                           <button type="button"
                             onClick={() => setConfirmModal({ type: "squared-off", strategy_id: "", group_id: gid })}
@@ -1616,7 +2090,7 @@ export default function AlgoBacktest() {
                           </button>
                         )}
                         <button type="button"
-                          onClick={() => window.open(`/algo-trade/execution/group/${encodeURIComponent(gid)}`, "_blank")}
+                          onClick={() => window.open(`/execution/group/${encodeURIComponent(gid)}`, "_blank")}
                           className="h-8 px-3 rounded-md bg-[#1a2f4a] text-white text-xs font-medium hover:bg-[#243d5e] transition-colors whitespace-nowrap">
                           View
                         </button>
@@ -1647,9 +2121,23 @@ export default function AlgoBacktest() {
                                 </div>
                                 <BrokerCell rec={rec} />
                                 <div><StatusBadge text={sStatus.text} cls={sStatus.cls} /></div>
-                                <div className="text-[14px] font-bold whitespace-nowrap tabular-nums" style={{ color: recPnl >= 0 ? "#16a34a" : "#ef4444" }}>{fmtMoney(recPnl)}</div>
+                                {(() => {
+                                  const cd = rec.entry_time && legCount === 0
+                                    ? entryCountdown(rec.entry_time, listenTime)
+                                    : null;
+                                  if (cd) {
+                                    return (
+                                      <span style={{ border: "1px solid #8fc4ff", borderRadius: "6px", background: "#f4f9ff", color: "#1580ed", padding: "3px 8px", fontSize: "11px" }} className="inline-flex w-fit items-center whitespace-nowrap tabular-nums font-medium">
+                                        entry in {cd}
+                                      </span>
+                                    );
+                                  }
+                                  return <div className="text-[14px] font-bold whitespace-nowrap tabular-nums" style={{ color: recPnl >= 0 ? "#16a34a" : "#ef4444" }}>{fmtMoney(recPnl)}</div>;
+                                })()}
                                 {/* Actions — visible on row hover only */}
-                                <div className="flex justify-end gap-2 opacity-0 group-hover/row:opacity-100 pointer-events-none group-hover/row:pointer-events-auto transition-opacity duration-150">
+                                <div className="flex justify-end items-center gap-2 opacity-0 group-hover/row:opacity-100 pointer-events-none group-hover/row:pointer-events-auto transition-opacity duration-150">
+                                  <MtmIcons legs={rec.legs ?? []} currentMtm={recPnl} navUrl={`/analyse/strategy/${encodeURIComponent(sid)}`} replayUrl={`/replay/strategy/${encodeURIComponent(sid)}`} />
+                                  <div className="w-px h-5 bg-[#e5e7eb]" />
                                   <button type="button" onClick={() => toggleDetails(sid)}
                                     className="h-8 px-3 rounded-md border border-[#d7e0ea] bg-white text-[#1f3347] text-xs font-medium hover:bg-gray-50 transition-colors whitespace-nowrap">
                                     {detailOpen ? "Hide Details" : "Show Details"}
@@ -1670,7 +2158,7 @@ export default function AlgoBacktest() {
                                     </button>
                                   )}
                                   <button type="button"
-                                    onClick={() => window.open(`/algo-trade/execution/strategy/${encodeURIComponent(sid)}`, "_blank")}
+                                    onClick={() => window.open(`/execution/strategy/${encodeURIComponent(sid)}`, "_blank")}
                                     className="h-8 px-3 rounded-md bg-[#1a2f4a] text-white text-xs font-medium hover:bg-[#243d5e] transition-colors whitespace-nowrap">
                                     View
                                   </button>

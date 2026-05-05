@@ -3,6 +3,7 @@ import { useParams, useNavigate } from "react-router";
 import PageMeta from "../../components/common/PageMeta";
 import { Table, TableBody, TableCell, TableHeader, TableRow } from "../../components/ui/table";
 import Badge from "../../components/ui/badge/Badge";
+import { calculateMargin, type SpanPos } from "../../utils/spanMargin";
 
 const API_BASE = import.meta.env.VITE_API_BASE_URL as string;
 
@@ -79,6 +80,15 @@ interface BrokerOrder {
   created_at?: string;
 }
 
+interface MtmHistoricalEntry {
+  timestamp: string[];
+  open: number[];
+  high: number[];
+  low: number[];
+  close: number[];
+  volume: number[];
+}
+
 interface TradePayload {
   trade?: {
     _id?: string;
@@ -89,6 +99,8 @@ interface TradePayload {
     broker?: string;
     broker_label?: string;
     broker_details?: { broker_name?: string; display_name?: string; broker_icon?: string };
+    activation_mode?: string;
+    trade_date?: string;
   };
   summary?: {
     mtm?: number;
@@ -934,6 +946,20 @@ export default function ExecutionView() {
   const updReconnRef  = useRef<ReturnType<typeof setTimeout> | null>(null);
   const exOrdReconnRef = useRef<ReturnType<typeof setTimeout> | null>(null);
   const underlyingRef = useRef("");
+  const ltpMapRef      = useRef<Record<string, number>>({});
+  const liveLtpRef     = useRef<number | null>(null);
+  const spotMapRef     = useRef<Record<string, number>>({});  // underlying → spot price, updated unconditionally from socket
+  const openLegsRef    = useRef<Leg[]>([]);
+  const marginTimerRef = useRef<ReturnType<typeof setTimeout> | null>(null);
+  const [marginBlocked, setMarginBlocked] = useState<number | null>(null);
+
+  const [mtmGraphOpen, setMtmGraphOpen] = useState(false);
+  const [mtmGraphData, setMtmGraphData] = useState<Record<string, MtmHistoricalEntry> | null>(null);
+  const [mtmGraphLoading, setMtmGraphLoading] = useState(false);
+  const [mtmGraphError, setMtmGraphError] = useState("");
+  const [latestListenTimestamp, setLatestListenTimestamp] = useState("2025-11-03T11:10:21");
+  const [mtmHoverIdx, setMtmHoverIdx] = useState<number | null>(null);
+  const mtmSvgRef = useRef<SVGSVGElement>(null);
 
   const [includeBrokerage, setIncludeBrokerage] = useState(false);
   const [brokerageRate, setBrokerageRate] = useState(0);
@@ -959,6 +985,33 @@ export default function ExecutionView() {
     underlyingRef.current = String(payload.trade?.ticker ?? payload.trade?.underlying ?? "").toUpperCase();
   }, [payload]);
 
+  function recalcMarginLocal(legs: Leg[], underlying: string, spot: number, liveMap: Record<string, number> = {}) {
+    if (!legs.length || !underlying) return;
+    const resolvedSpot = spot > 0 ? spot : (spotMapRef.current[underlying.toUpperCase()] ?? 0);
+    const positions: SpanPos[] = legs
+      .filter(l => Number(l.strike) > 0 && (l.expiry_date || l.expiry) && (l.option || l.option_type))
+      .map(leg => {
+        const ltp = (leg.token ? (liveMap[String(leg.token)] ?? null) : null) ?? leg.last_saw_price ?? leg.mark_price ?? leg.entry_price ?? 0;
+        return {
+          underlying,
+          instrument_type: String(leg.option ?? leg.option_type ?? "CE").toUpperCase(),
+          expiry:           String(leg.expiry_date ?? leg.expiry ?? "").trim(),
+          strike:           Number(leg.strike),
+          transaction_type: String(leg.position ?? leg.position_side ?? "sell").toLowerCase().includes("sell") ? "SELL" : "BUY",
+          quantity:         Number(leg.quantity) || 1,
+          lot_size:         Number(leg.lot_size) || 1,
+          ltp:              Number(ltp) || 0,
+          spot:             resolvedSpot,
+        } as SpanPos;
+      });
+    if (!positions.length) return;
+    const result = calculateMargin(positions);
+    console.log("[MARGIN][ExecutionView] positions:", JSON.parse(JSON.stringify(positions)));
+    console.log("[MARGIN][ExecutionView] result:", JSON.parse(JSON.stringify(result)));
+    const net = result.net_margin > 0 ? result.net_margin : result.total_margin;
+    if (net > 0) setMarginBlocked(net);
+  }
+
   // connect both sockets on mount
   useEffect(() => {
     const SUB = JSON.stringify({ activation_mode: "algo-backtest", status: "algo-backtest", reason: "subscribe" });
@@ -975,13 +1028,28 @@ export default function ExecutionView() {
         const ul = underlyingRef.current;
         const ltpArr = (d.ltp as Array<{ token?: string; symbol?: string; underlying?: string; option_type?: string; ltp?: number }>) ?? [];
 
+        // Track latest listen timestamp from socket
+        const listenTs = String(d.listen_timestamp ?? "").trim();
+        if (listenTs) setLatestListenTimestamp(listenTs);
+
+        // store all spot prices unconditionally — no dependency on underlyingRef being set yet
+        const spotMapData = d.spot_map as Record<string, number> | undefined;
+        if (spotMapData) {
+          for (const [und, price] of Object.entries(spotMapData)) {
+            if (price > 0) spotMapRef.current[und.toUpperCase()] = Number(price);
+          }
+        }
+        for (const item of ltpArr) {
+          if (String(item.option_type ?? "").toUpperCase() === "SPOT" && item.underlying && item.ltp != null && item.ltp > 0) {
+            spotMapRef.current[String(item.underlying).toUpperCase()] = Number(item.ltp);
+          }
+        }
+        // update liveLtp state for display (still gated on ul for UI)
         if (ul) {
-          const spotMap = d.spot_map as Record<string, number> | undefined;
-          if (spotMap?.[ul] != null) {
-            setLiveLtp(Number(spotMap[ul]));
-          } else {
-            const found = ltpArr.find(x => x.underlying?.toUpperCase() === ul && x.option_type?.toUpperCase() === "SPOT");
-            if (found?.ltp != null) setLiveLtp(Number(found.ltp));
+          const newSpot = spotMapRef.current[ul] ?? 0;
+          if (newSpot > 0) {
+            setLiveLtp(newSpot);
+            liveLtpRef.current = newSpot;
           }
         }
 
@@ -992,6 +1060,7 @@ export default function ExecutionView() {
               const key = String(item.token ?? "").trim();
               if (key && item.ltp != null) next[key] = Number(item.ltp);
             }
+            ltpMapRef.current = next;  // sync update so timer callbacks read latest value immediately
             return next;
           });
         }
@@ -1006,7 +1075,13 @@ export default function ExecutionView() {
       ws.onopen = () => ws.send(SUB);
       ws.onmessage = e => {
         let p: Record<string, unknown>; try { p = JSON.parse(e.data); } catch { return; }
-        if (p.type === "execute_order") fetchDataRef.current();
+        if (p.type === "execute_order") {
+          fetchDataRef.current();
+          if (marginTimerRef.current) clearTimeout(marginTimerRef.current);
+          marginTimerRef.current = setTimeout(() => {
+            recalcMarginLocal(openLegsRef.current, underlyingRef.current, liveLtpRef.current ?? 0, ltpMapRef.current);
+          }, 500);
+        }
       };
       ws.onclose = () => { if (exOrdWsRef.current !== ws) return; exOrdReconnRef.current = setTimeout(connectExOrd, 3000); };
     }
@@ -1043,17 +1118,32 @@ export default function ExecutionView() {
 
     fetch(url)
       .then(r => { if (!r.ok) throw new Error("Failed to load trade history"); return r.json(); })
-      .then(data => { if (token !== reqRef.current) return; setPayload(data ?? {}); setLoading(false); })
+      .then(data => {
+        if (token !== reqRef.current) return;
+        setPayload(data ?? {});
+        setLoading(false);
+        // calculate margin on page load using API spot — same as AnalyseView
+        const ul = String(data?.trade?.ticker ?? data?.trade?.underlying ?? "").toUpperCase();
+        const spot = Number(data?.summary?.spot_price ?? 0);
+        const legs: Leg[] = (data?.legs?.open ?? []) as Leg[];
+        if (ul) underlyingRef.current = ul;
+        if (legs.length && ul) recalcMarginLocal(legs, ul, spot, ltpMapRef.current);
+      })
       .catch(e => { if (token !== reqRef.current) return; setError(e?.message ?? "Error loading data"); setLoading(false); });
   }, [type, id]);
 
   useEffect(() => { fetchDataRef.current = fetchData; }, [fetchData]);
   useEffect(() => { fetchData(); }, [fetchData]);
 
+  // keep refs in sync for timer callbacks
+  useEffect(() => { ltpMapRef.current = ltpMap; }, [ltpMap]);
+  useEffect(() => { liveLtpRef.current = liveLtp; }, [liveLtp]);
+
   const trade = payload?.trade ?? {};
   const summary = payload?.summary ?? {};
   const openLegs = payload?.legs?.open ?? [];
   const closedLegs = payload?.legs?.closed ?? [];
+  useEffect(() => { openLegsRef.current = openLegs; }, [openLegs]);
   const orders = payload?.broker_orders ?? [];
   const notifications = payload?.notifications ?? [];
   const notificationStatus = payload?.notification_status ?? {};
@@ -1100,9 +1190,251 @@ export default function ExecutionView() {
   const changeText = summary.spot_change_text ?? "";
   const isNegativeChange = changeText.trim().startsWith("-");
 
+  async function handleMtmGraph() {
+    // Collect unique non-empty tokens from all open + closed legs
+    const allLegs = [
+      ...(openLegs ?? []),
+      ...(closedLegs ?? []),
+    ];
+    const tokens = [...new Set(
+      allLegs.map(l => String(l.token ?? "").trim()).filter(Boolean)
+    )];
+    if (tokens.length === 0) return;
+
+    const activationMode = trade.activation_mode ?? "algo-backtest";
+    const candle = latestListenTimestamp;
+
+    setMtmGraphOpen(true);
+    setMtmGraphLoading(true);
+    setMtmGraphError("");
+    setMtmGraphData(null);
+
+    try {
+      const base = String(API_BASE || "").replace(/\/+$/, "");
+      const url = `${base}/mtm/historical-data?tokens=${encodeURIComponent(tokens.join(","))}&candle=${encodeURIComponent(candle)}&activation_mode=${encodeURIComponent(activationMode)}`;
+      const res = await fetch(url);
+      if (!res.ok) throw new Error(`API error ${res.status}`);
+      const data: Record<string, MtmHistoricalEntry> = await res.json();
+      setMtmGraphData(data);
+    } catch (e: unknown) {
+      setMtmGraphError(e instanceof Error ? e.message : "Failed to load MTM graph data");
+    } finally {
+      setMtmGraphLoading(false);
+    }
+  }
+
   return (
     <>
       <PageMeta title={`${title} — Execution`} description="Execution trade history" />
+
+      {/* MTM Historical Graph Modal */}
+      {mtmGraphOpen && (() => {
+        // ── build combined MTM series ──────────────────────────────────────
+        const allLegs = [...(openLegs ?? []), ...(closedLegs ?? [])];
+        const hist = mtmGraphData ?? {};
+
+        // union of all timestamps, sorted
+        const tsSet = new Set<string>();
+        for (const e of Object.values(hist)) e.timestamp.forEach(t => tsSet.add(t));
+        const timestamps = [...tsSet].sort();
+
+        // token → index-map for O(1) lookup
+        const closeAt: Record<string, Record<string, number>> = {};
+        for (const [tk, e] of Object.entries(hist)) {
+          closeAt[tk] = {};
+          e.timestamp.forEach((t, i) => { closeAt[tk][t] = e.close[i]; });
+        }
+
+        // combined MTM per timestamp
+        const mtmValues = timestamps.map(ts => {
+          let total = 0;
+          for (const leg of allLegs) {
+            const tk = String(leg.token ?? "").trim();
+            if (!tk || !closeAt[tk]) continue;
+            const entryTs = (leg.entry_trade?.traded_timestamp ?? leg.entry_timestamp ?? leg.entry_time ?? "").slice(0, 19);
+            const exitTs  = (leg.exit_trade?.traded_timestamp  ?? leg.exit_timestamp  ?? leg.exit_time  ?? "").slice(0, 19);
+            if (entryTs && ts < entryTs) continue; // not entered yet
+            const entryPx = Number(leg.entry_price ?? leg.buy_price  ?? leg.entry_trade?.price ?? 0);
+            const exitPx  = Number(leg.exit_price  ?? leg.sell_price ?? leg.exit_trade?.price  ?? 0);
+            const qty     = Number(leg.effective_quantity ?? leg.quantity ?? 0);
+            const isSell  = String(leg.position_side ?? leg.position ?? "sell").toLowerCase() !== "buy";
+            if (!entryPx || !qty) continue;
+            const curPx = (exitTs && ts >= exitTs && exitPx > 0) ? exitPx : (closeAt[tk][ts] ?? 0);
+            if (!curPx) continue;
+            total += isSell ? (entryPx - curPx) * qty : (curPx - entryPx) * qty;
+          }
+          return total;
+        });
+
+        const lastMtm   = mtmValues[mtmValues.length - 1] ?? 0;
+        const isUp      = lastMtm >= 0;
+        const minMtm    = Math.min(...mtmValues, 0);
+        const maxMtm    = Math.max(...mtmValues, 0);
+        const range     = maxMtm - minMtm || 1;
+
+        const W = 700, H = 220;
+        const PL = 72, PR = 16, PT = 20, PB = 28;
+        const plotW = W - PL - PR;
+        const plotH = H - PT - PB;
+        const n = timestamps.length;
+
+        const toX = (i: number) => PL + (i / Math.max(n - 1, 1)) * plotW;
+        const toY = (v: number) => PT + (1 - (v - minMtm) / range) * plotH;
+        const zeroY = toY(0);
+
+        const linePoints = mtmValues.map((v, i) => `${toX(i).toFixed(1)},${toY(v).toFixed(1)}`).join(" ");
+
+        // fill path: trace line → drop to zero → back
+        const fillPath = n > 0
+          ? `M${toX(0).toFixed(1)},${zeroY.toFixed(1)} ` +
+            mtmValues.map((v, i) => `L${toX(i).toFixed(1)},${toY(v).toFixed(1)}`).join(" ") +
+            ` L${toX(n - 1).toFixed(1)},${zeroY.toFixed(1)} Z`
+          : "";
+
+        const fmtMtm = (v: number) => {
+          const abs = Math.abs(v);
+          const s = v < 0 ? "-" : "";
+          if (abs >= 1e5) return `${s}${(abs / 1e5).toFixed(1)}L`;
+          if (abs >= 1e3) return `${s}${(abs / 1e3).toFixed(1)}K`;
+          return v.toFixed(0);
+        };
+
+        // x-axis tick labels (up to 7)
+        const xTicks: number[] = n <= 7
+          ? mtmValues.map((_, i) => i)
+          : [0, Math.floor(n * 0.25), Math.floor(n * 0.5), Math.floor(n * 0.75), n - 1];
+
+        return (
+          <div className="fixed inset-0 z-50 flex items-center justify-center bg-black/50 px-4">
+            <div className="relative w-full max-w-3xl rounded-2xl border border-gray-200 bg-white p-6 shadow-xl dark:border-gray-700 dark:bg-gray-900">
+              {/* Header */}
+              <div className="mb-4 flex items-center justify-between">
+                <div className="flex items-center gap-3">
+                  <span className="text-base font-semibold text-gray-800 dark:text-white">Today's MTM Graph</span>
+                  <span className={`text-sm font-bold tabular-nums ${isUp ? "text-green-600" : "text-red-500"}`}>
+                    {isUp ? "+" : ""}{fmtMtm(lastMtm)}
+                  </span>
+                </div>
+                <button type="button" onClick={() => setMtmGraphOpen(false)}
+                  className="rounded-lg p-1 text-gray-400 hover:bg-gray-100 hover:text-gray-600 dark:hover:bg-gray-800">
+                  <svg xmlns="http://www.w3.org/2000/svg" fill="none" viewBox="0 0 24 24" strokeWidth={2} stroke="currentColor" className="h-5 w-5">
+                    <path strokeLinecap="round" strokeLinejoin="round" d="M6 18L18 6M6 6l12 12" />
+                  </svg>
+                </button>
+              </div>
+
+              {/* Loading / Error */}
+              {mtmGraphLoading && (
+                <div className="flex items-center justify-center py-16 text-gray-500">
+                  <span className="mr-2 h-5 w-5 animate-spin rounded-full border-2 border-blue-500 border-t-transparent" />
+                  Loading historical data…
+                </div>
+              )}
+              {mtmGraphError && !mtmGraphLoading && (
+                <div className="rounded border border-red-200 bg-red-50 px-4 py-3 text-sm text-red-600">{mtmGraphError}</div>
+              )}
+
+              {/* Chart */}
+              {!mtmGraphLoading && !mtmGraphError && (
+                n === 0
+                  ? <div className="py-10 text-center text-sm text-gray-400">No historical data found for active tokens.</div>
+                  : (() => {
+                      const hi = mtmHoverIdx;
+                      const hx = hi !== null ? toX(hi) : null;
+                      const hy = hi !== null ? toY(mtmValues[hi]) : null;
+                      const hMtm = hi !== null ? mtmValues[hi] : null;
+                      const hTs  = hi !== null ? timestamps[hi] : null;
+                      const hIsUp = hMtm !== null ? hMtm >= 0 : isUp;
+
+                      // tooltip box: flip left if near right edge
+                      const tipX = hx !== null ? (hx > W - PL - 80 ? hx - 110 : hx + 10) : 0;
+
+                      const handleMouseMove = (e: React.MouseEvent<SVGSVGElement>) => {
+                        const svg = mtmSvgRef.current;
+                        if (!svg || n === 0) return;
+                        const rect = svg.getBoundingClientRect();
+                        const svgX = ((e.clientX - rect.left) / rect.width) * W;
+                        const relX = svgX - PL;
+                        const idx = Math.round((relX / plotW) * (n - 1));
+                        setMtmHoverIdx(Math.max(0, Math.min(n - 1, idx)));
+                      };
+
+                      return (
+                        <svg ref={mtmSvgRef} viewBox={`0 0 ${W} ${H}`} className="w-full cursor-crosshair"
+                          style={{ height: 260 }}
+                          onMouseMove={handleMouseMove}
+                          onMouseLeave={() => setMtmHoverIdx(null)}>
+                          <defs>
+                            <clipPath id="plot-clip">
+                              <rect x={PL} y={PT} width={plotW} height={plotH} />
+                            </clipPath>
+                          </defs>
+
+                          {/* Zero reference line */}
+                          <line x1={PL} y1={zeroY} x2={W - PR} y2={zeroY}
+                            stroke="#d1d5db" strokeWidth="1" strokeDasharray="4,3" />
+
+                          {/* Fill area */}
+                          {fillPath && (
+                            <path d={fillPath} clipPath="url(#plot-clip)"
+                              fill={isUp ? "rgba(22,163,74,0.12)" : "rgba(239,68,68,0.15)"} />
+                          )}
+
+                          {/* MTM line */}
+                          <polyline points={linePoints} clipPath="url(#plot-clip)"
+                            fill="none" stroke="#2563eb"
+                            strokeWidth="1.8" strokeLinejoin="round" strokeLinecap="round" />
+
+                          {/* Y-axis labels */}
+                          {[maxMtm, 0, minMtm].map((v, i) => (
+                            <text key={i} x={PL - 6} y={toY(v) + 4}
+                              textAnchor="end" fontSize="10" fill="#9ca3af">{fmtMtm(v)}</text>
+                          ))}
+
+                          {/* X-axis labels */}
+                          {xTicks.map(i => (
+                            <text key={i} x={toX(i)} y={H - 6}
+                              textAnchor="middle" fontSize="10" fill="#9ca3af">
+                              {timestamps[i]?.slice(11, 16)}
+                            </text>
+                          ))}
+
+                          {/* Axes */}
+                          <line x1={PL} y1={PT} x2={PL} y2={PT + plotH} stroke="#e5e7eb" strokeWidth="1" />
+                          <line x1={PL} y1={PT + plotH} x2={W - PR} y2={PT + plotH} stroke="#e5e7eb" strokeWidth="1" />
+
+                          {/* Hover crosshair + dot + tooltip */}
+                          {hx !== null && hy !== null && hMtm !== null && hTs && (
+                            <>
+                              {/* Vertical crosshair */}
+                              <line x1={hx} y1={PT} x2={hx} y2={PT + plotH}
+                                stroke="#94a3b8" strokeWidth="1" strokeDasharray="3,2" />
+
+                              {/* Dot on line */}
+                              <circle cx={hx} cy={hy} r={4} fill="#2563eb" stroke="#fff" strokeWidth="1.5" />
+
+                              {/* Tooltip box */}
+                              <rect x={tipX} y={hy - 30} width={100} height={38}
+                                rx={5} fill="white" stroke="#e2e8f0" strokeWidth="1"
+                                filter="drop-shadow(0 1px 3px rgba(0,0,0,0.12))" />
+                              <text x={tipX + 8} y={hy - 14} fontSize="10" fill="#64748b">
+                                {hTs.slice(11, 16)}
+                              </text>
+                              <text x={tipX + 8} y={hy + 2} fontSize="11" fontWeight="600"
+                                fill={hIsUp ? "#16a34a" : "#ef4444"}>
+                                {hIsUp ? "+" : ""}{hMtm.toFixed(0)}
+                              </text>
+                            </>
+                          )}
+                        </svg>
+                      );
+                    })()
+              )}
+            </div>
+          </div>
+        );
+      })()}
+
       <div className="min-h-screen bg-[#f4f6f9]">
 
         <div className="px-4 py-6 md:px-6">
@@ -1136,7 +1468,7 @@ export default function ExecutionView() {
               </div>
               <div className="flex flex-wrap items-center justify-start gap-2 lg:justify-end">
                 <button type="button" className={headerActionButtonClass}><HeaderActionIcon />Screenshot</button>
-                <button type="button" className={headerActionButtonClass}><HeaderActionIcon />Today's MTM Graph</button>
+                <button type="button" className={headerActionButtonClass} onClick={handleMtmGraph}><HeaderActionIcon />Today's MTM Graph</button>
                 <button type="button" className={headerActionButtonClass}><HeaderActionIcon />Analyse</button>
                 <button type="button" className={headerActionButtonClass}><HeaderActionIcon />Replay</button>
               </div>
@@ -1306,7 +1638,7 @@ export default function ExecutionView() {
                   <div className="flex flex-col gap-1">
                     <span>Margin Blocked (approx)</span>
                     <span className="text-sm font-medium text-gray-800 dark:text-white/90">
-                      {summary.margin_blocked != null ? fmtMoney(summary.margin_blocked) : "₹ 0"}
+                      {fmtMoney(marginBlocked ?? summary.margin_blocked ?? 0)}
                     </span>
                   </div>
 
