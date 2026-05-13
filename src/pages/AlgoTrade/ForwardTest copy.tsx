@@ -54,7 +54,7 @@ interface StrategyFeatureRow {
 interface PortfolioMeta { group_id?: string; portfolio?: string; group_name?: string }
 interface BrokerDetails { alias?: string; display_name?: string; broker_name?: string; name?: string; title?: string; broker?: string; broker_icon?: string }
 interface BrokerSettings {
-  broker_id?: string; settings_active?: boolean; stop_loss?: number; target?: number;
+  broker_id?: string; stop_loss?: number; target?: number;
   lock_and_trail?: { instrument_move?: number; stop_loss_move?: number };
   trail_sl?: { instrument_move?: number; stop_loss_move?: number };
   state?: { effective_sl?: number; lock_activated?: boolean; current_lock_floor?: number };
@@ -69,7 +69,6 @@ interface DeployedRecord {
   strategy_feature_status_rows?: StrategyFeatureRow[];
   overall_sl_reentry_done?: number; overall_tgt_reentry_done?: number;
   last_overall_event_reason?: string;
-  entry_time?: string;
 }
 interface Group { group_id: string; group_name: string; portfolio_id: string; items: DeployedRecord[] }
 interface BrokerEntry { key: string; label: string; icon: string; brokerId: string; userId: string; strategyCount: number; openLegCount: number; mtm: number }
@@ -298,40 +297,6 @@ function BrokerSettingsStrip({ bs }: { bs: BrokerSettings }) {
     chips.push(<span key="trail" className="inline-flex items-center px-[7px] py-[2px] rounded text-[10px] font-semibold whitespace-nowrap bg-sky-50 text-sky-700 border border-sky-200">Trail {fmtRs(bs.trail_sl.stop_loss_move)}</span>);
   if (!chips.length) return null;
   return <div className="flex flex-wrap gap-1 mt-2 pt-2 border-t border-blue-100">{chips}</div>;
-}
-
-function CountdownOrMtm({ entryTime, pnl }: { entryTime?: string; pnl: number }) {
-  const [remaining, setRemaining] = useState<number>(() => {
-    if (!entryTime) return 0;
-    return new Date(entryTime.replace(" ", "T")).getTime() - Date.now();
-  });
-
-  useEffect(() => {
-    if (!entryTime) return;
-    const target = new Date(entryTime.replace(" ", "T")).getTime();
-    const tick = () => setRemaining(target - Date.now());
-    tick();
-    const id = setInterval(tick, 1000);
-    return () => clearInterval(id);
-  }, [entryTime]);
-
-  if (remaining > 0) {
-    const totalSecs = Math.ceil(remaining / 1000);
-    const h = Math.floor(totalSecs / 3600).toString().padStart(2, "0");
-    const m = Math.floor((totalSecs % 3600) / 60).toString().padStart(2, "0");
-    const s = (totalSecs % 60).toString().padStart(2, "0");
-    return (
-      <div className="inline-flex w-fit justify-self-start items-center px-3 py-[6px] rounded border border-[#cfe0ff] bg-[#eef4ff] text-[#1580ed] text-[13px] font-semibold whitespace-nowrap tabular-nums">
-        Entry in {h}:{m}:{s}
-      </div>
-    );
-  }
-
-  return (
-    <div className="text-[14px] font-bold whitespace-nowrap tabular-nums" style={{ color: pnl >= 0 ? "#16a34a" : "#ef4444" }}>
-      {fmtMoney(pnl)}
-    </div>
-  );
 }
 
 function StatusBadge({ text, cls }: { text: string; cls: string }) {
@@ -902,7 +867,7 @@ export default function ForwardTest() {
       const openLegs = Array.isArray(rec.legs) ? rec.legs.filter(l => l && !l.exit_trade).length : (rec.open_legs_count ?? 0);
       totalOpen += openLegs; totalCount += 1;
     }
-    for (const v of Object.values(newPnl)) totalPnl += v;
+    for (const v of Object.values(newGroupPnl)) totalPnl += v;
 
     setPnlMap(newPnl);
     setGroupPnlMap(newGroupPnl);
@@ -941,11 +906,6 @@ export default function ForwardTest() {
 
   // ── process execute-orders message ────────────────────────────────────────
   const processExecOrds = useCallback((payload: Record<string, unknown>) => {
-    if (payload.type === "broker-settings") {
-      const bsList = ((payload.data as Record<string, unknown>)?.brokers ?? []) as BrokerSettings[];
-      if (Array.isArray(bsList)) setBrokerSettingsCache(prev => { const n = { ...prev }; for (const bs of bsList) { const bid = String(bs.broker_id ?? "").trim(); if (bid) n[bid] = bs; } return n; });
-      return;
-    }
     // Handle: { data: { records: [] } }  |  { data: [] }  |  { records: [] }  |  { data: singleRec }
     const d = payload.data as Record<string, unknown> | undefined;
     const recs: DeployedRecord[] = Array.isArray(payload.data) ? (payload.data as DeployedRecord[])
@@ -1154,7 +1114,7 @@ export default function ForwardTest() {
     if (!userId || !brokerId) return next;
     setBsLoadingModal(true);
     try {
-      const r = await fetch(`${API_BASE}/get_broker_stoploss_settings/${encodeURIComponent(brokerId)}/${encodeURIComponent(userId)}/${ACTIVATION_MODE}`);
+      const r = await fetch(`${API_BASE}/get_broker_stoploss_settings/${encodeURIComponent(userId)}/${encodeURIComponent(brokerId)}/${ACTIVATION_MODE}`);
       if (r.ok) {
         const data = await r.json();
         if (data?.found && data?.settings) {
@@ -1179,12 +1139,6 @@ export default function ForwardTest() {
     finally { setBsLoadingModal(false); }
     return next;
   }, []); // eslint-disable-line react-hooks/exhaustive-deps
-
-  const selectBroker = useCallback(async (entry: BrokerEntry) => {
-    setSelectedBrokerEntry(entry);
-    const next = await fetchBrokerModalState(entry);
-    setBsModal(next);
-  }, [fetchBrokerModalState]);
 
   const openBrokerSettings = useCallback(async () => {
     const entry = selectedBrokerEntry ?? brokerEntries[0];
@@ -1288,13 +1242,6 @@ export default function ForwardTest() {
     };
   }, []); // eslint-disable-line react-hooks/exhaustive-deps
 
-  // auto-select first broker when entries first appear
-  useEffect(() => {
-    if (brokerEntries.length > 0 && !selectedBrokerEntry) {
-      selectBroker(brokerEntries[0]);
-    }
-  }, [brokerEntries]); // eslint-disable-line react-hooks/exhaustive-deps
-
   const toggleGroup = (gid: string) => setExpandedGroups(p => { const n = new Set(p); n.has(gid) ? n.delete(gid) : n.add(gid); return n; });
   const toggleDetails = (sid: string) => setExpandedDetails(p => { const n = new Set(p); n.has(sid) ? n.delete(sid) : n.add(sid); return n; });
 
@@ -1328,12 +1275,6 @@ export default function ForwardTest() {
   }, []);
 
   const totalMtmColor = totalMtm >= 0 ? "text-green-500" : "text-red-500";
-
-  useEffect(() => {
-    const mtm = Math.round(Object.values(pnlMap).reduce((s, v) => s + v, 0) * 100) / 100;
-    document.title = `${mtm >= 0 ? "▲" : "▼"} ${fmtMoney(mtm)} | Forward Test`;
-    return () => { document.title = "Forward Test | Algo Trade"; };
-  }, [pnlMap]);
 
   // ── filtered activation items ─────────────────────────────────────────────
   const filteredActivationItems: (StrategyItem | PortfolioItem)[] = (() => {
@@ -1502,9 +1443,8 @@ export default function ForwardTest() {
               : brokerEntries.map(entry => {
                 const mc = entry.mtm >= 0 ? "#16a34a" : "#ef4444";
                 const bs = brokerSettingsCache[entry.brokerId];
-                const isSelected = (selectedBrokerEntry ?? brokerEntries[0])?.key === entry.key;
                 return (
-                  <div key={entry.key} onClick={() => selectBroker(entry)} className={`flex flex-col px-3 py-[10px] border rounded-[10px] cursor-pointer transition-colors ${isSelected ? "border-blue-500 bg-[#eaf3ff] ring-1 ring-blue-400" : "border-blue-200 bg-[#f7fbff] hover:bg-[#eef5ff]"}`}>
+                  <div key={entry.key} className="flex flex-col px-3 py-[10px] border border-blue-200 rounded-[10px] bg-[#f7fbff]">
                     <div className="flex items-start gap-2">
                       {entry.icon && <img src={entry.icon} alt="" className="w-4 h-4 object-contain mt-[2px] shrink-0" onError={e => { (e.currentTarget as HTMLImageElement).style.display = "none"; }} />}
                       <div className="flex-1 min-w-0">
@@ -1515,7 +1455,7 @@ export default function ForwardTest() {
                         <p className="text-[11px] text-[#5b7087] mt-[2px]">{entry.strategyCount} strateg{entry.strategyCount === 1 ? "y" : "ies"} • {entry.openLegCount} open legs</p>
                       </div>
                     </div>
-                    {bs?.settings_active && <BrokerSettingsStrip bs={bs} />}
+                    {bs && <BrokerSettingsStrip bs={bs} />}
                   </div>
                 );
               })}
@@ -1670,7 +1610,7 @@ export default function ForwardTest() {
                                 </div>
                                 <BrokerCell rec={rec} />
                                 <div><StatusBadge text={sStatus.text} cls={sStatus.cls} /></div>
-                                <CountdownOrMtm entryTime={rec.entry_time} pnl={recPnl} />
+                                <div className="text-[14px] font-bold whitespace-nowrap tabular-nums" style={{ color: recPnl >= 0 ? "#16a34a" : "#ef4444" }}>{fmtMoney(recPnl)}</div>
                                 {/* Actions — visible on row hover only */}
                                 <div className="flex justify-end items-center gap-2 opacity-0 group-hover/row:opacity-100 pointer-events-none group-hover/row:pointer-events-auto transition-opacity duration-150">
                                   <MtmIcons legs={rec.legs ?? []} currentMtm={recPnl} navUrl={`/analyse/strategy/${encodeURIComponent(sid)}`} replayUrl={`/replay/strategy/${encodeURIComponent(sid)}`} />

@@ -57,6 +57,8 @@ export const navItems: NavItem[] = [
       { name: "Simulator", path: "/simulator/simulator", pro: false },
       { name: "SL Simulator", path: "/simulator/sl-simulator", pro: false },
       { name: "Option Simulator", path: "/simulator/option-simulator", pro: false },
+      { name: "Portfolio", path: "/simulator/portfolio", pro: false },
+      { name: "Paper Trade", path: "/simulator/paper-trade", pro: false },
     ],
   },
   {
@@ -65,6 +67,7 @@ export const navItems: NavItem[] = [
     subItems: [
       { name: "Forward Test", path: "/forward-test", pro: false },
       { name: "Backtest", path: "/backtest", pro: false },
+      { name: "Live Option Chain", path: "/live-option-chain", pro: false },
     ],
   },
   {

@@ -30,6 +30,7 @@ import Home from "./pages/Dashboard/Home";
 import Stocks from "./pages/Dashboard/Stocks";
 import BacktestStrategy from "./pages/Backtest/Strategy";
 import BacktestPortfolios from "./pages/Backtest/Portfolios";
+import BacktestPortfolio from "./pages/Backtest/Portfolio";
 import ForwardTest from "./pages/AlgoTrade/ForwardTest";
 import AlgoBacktest from "./pages/AlgoTrade/Backtest";
 import PortfolioActivation from "./pages/Common/PortfolioActivation";
@@ -41,6 +42,9 @@ import AnalysePage from "./pages/Common/Analyse";
 import OptionSimulatorPage from "./pages/Simulator/OptionSimulator";
 import MarginCalculator from "./pages/Backtest/MarginCalculator";
 import BarReplay from "./pages/Common/BarReplay";
+import LiveOptionChainPage from "./pages/Common/LiveOptionChain";
+import PaperTradePage from "./pages/simulator/PaperTrade";
+import SimulatorPortfolioPage from "./pages/simulator/Portfolio";
 
 export default function App() {
   return (
@@ -53,7 +57,9 @@ export default function App() {
             <Route index path="/" element={<Home />} />
             <Route path="/stocks" element={<Stocks />} />
             <Route path="/backtest/strategy" element={<BacktestStrategy />} />
+            <Route path="/backtest/strategy/:strategy_id" element={<BacktestStrategy />} />
             <Route path="/backtest/portfolios" element={<BacktestPortfolios />} />
+            <Route path="/backtest/portfolio/:portfolioId" element={<BacktestPortfolio />} />
             <Route path="/forward-test" element={<ForwardTest />} />
             <Route path="/backtest" element={<AlgoBacktest />} />
             <Route path="/execution/:type/:id" element={<ExecutionView />} />
@@ -63,9 +69,13 @@ export default function App() {
             <Route path="/simulator/sl-simulator" element={<SLSimulatorPage />} />
             <Route path="/analyse/:entityType/:entityId" element={<AnalysePage />} />
             <Route path="/simulator/option-simulator" element={<OptionSimulatorPage />} />
+            <Route path="/simulator/paper-trade" element={<PaperTradePage />} />
+            <Route path="/simulator/paper-trade/:strategyId" element={<PaperTradePage />} />
+            <Route path="/simulator/portfolio" element={<SimulatorPortfolioPage />} />
             <Route path="/backtest/margin-calculator" element={<MarginCalculator />} />
             <Route path="/backtest/bar-replay" element={<BarReplay />} />
             <Route path="/replay/:entityType/:entityId" element={<BarReplay />} />
+            <Route path="/live-option-chain" element={<LiveOptionChainPage />} />
 
             {/* Others Page */}
             <Route path="/profile" element={<UserProfiles />} />
@@ -101,6 +111,8 @@ export default function App() {
           </Route>
 
           {/* Auth Layout */}
+          <Route path="/embed/simulator/paper-trade" element={<PaperTradePage />} />
+          <Route path="/embed/simulator/paper-trade/:strategyId" element={<PaperTradePage />} />
           <Route path="/signin" element={<SignIn />} />
           <Route path="/signup" element={<SignUp />} />
 

@@ -437,7 +437,7 @@ export default function BarReplay() {
   const [replaySpotPrice, setReplaySpotPrice] = useState<number | undefined>();
   // full candle history loaded once on page load
   const historicalDataRef = useRef<HistoricalData>({});
-  const [histLoaded, setHistLoaded] = useState(false);
+  const [_histLoaded, setHistLoaded] = useState(false);
 
   useEffect(() => {
     if (!entityType || !entityId) return;
@@ -860,6 +860,7 @@ export default function BarReplay() {
               replayTimestamp={replayTimestamp}
               replayLtpMap={replayLtpMap}
               replaySpotPrice={replaySpotPrice}
+              disableRealtimeSockets
             />
           </>
         )}

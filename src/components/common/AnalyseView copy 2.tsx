@@ -1,5 +1,4 @@
 import { useCallback, useEffect, useRef, useState } from "react";
-import { useParams } from "react-router";
 import { Chart } from "chart.js/auto";
 import { calculateMargin, type SpanPos } from "../../utils/spanMargin";
 
@@ -50,6 +49,8 @@ interface Leg {
   quantity: number;
   strike: number;
   type: TradeType;
+  apiPnl?: number;        // pre-computed PnL from backend (leg.pnl)
+  apiLtp?: number | null; // last_saw_price / mark_price from backend
 }
 
 interface TooltipState {
@@ -94,9 +95,14 @@ const OC_CAROUSEL_STEP = OC_ITEM_WIDTH + OC_ITEM_GAP;
 const styles = scopeCss(`
   * { box-sizing: border-box; margin: 0; padding: 0; }
   .sl-page { min-height: 100vh; background: #f8f9fa; font-family: -apple-system, BlinkMacSystemFont, 'Segoe UI', Roboto, 'Helvetica Neue', Arial, sans-serif; }
-  .main-container { display: flex; gap: 20px; align-items: flex-start; }
+  .main-container { display: flex; flex-wrap: wrap; gap: 20px; align-items: flex-start; }
+  /* ── Left Panel Tabs ── */
+  .left-panel-tabs { display: flex; border-bottom: 1px solid #e5e7eb; background: #fff; flex-shrink: 0; }
+  .left-panel-tab { flex: 1; text-align: center; padding: 11px 16px; font-size: 13px; font-weight: 500; color: #6b7280; cursor: pointer; border: none; border-bottom: 2px solid transparent; background: none; font-family: inherit; transition: color .15s, border-color .15s; }
+  .left-panel-tab.active { color: #2563eb; border-bottom-color: #2563eb; background: #f0f7ff; }
+  .left-panel-tab:hover:not(.active) { color: #374151; background: #f9fafb; }
   /* ── Option Chain Panel ── */
-  .option-chain-panel { width: 500px; flex-shrink: 0; background: #fff; border-radius: 8px; border: 1px solid #e5e7eb; box-shadow: 0 2px 10px rgba(0,0,0,.08); overflow: hidden; display: flex; flex-direction: column; }
+  .option-chain-panel { width: 760px; min-width: min(760px, 100%); flex: 0 0 auto; background: #fff; border-radius: 8px; border: 1px solid #e5e7eb; box-shadow: 0 2px 10px rgba(0,0,0,.08); overflow: hidden; display: flex; flex-direction: column; height: calc(100vh - 48px); }
   .oc-header { display: flex; align-items: center; justify-content: space-between; padding: 8px 10px; border-bottom: 1px solid #D9D9D9; font-size: 13px; }
   .oc-header-left { color: #6b7280; font-size: 12px; }
   .oc-title { font-weight: 700; font-size: 13px; color: #333; }
@@ -129,7 +135,7 @@ const styles = scopeCss(`
   .oi-progress-call { background: #FBE2E2; width: 100%; height: 100%; }
   .oi-progress-put { background: #CDF1DF; width: 100%; height: 100%; }
   /* Table */
-  .oc-custom-table { width: 100%; overflow-x: auto; overflow-y: auto; max-height: 520px; font-size: 13px; }
+  .oc-custom-table { width: 100%; overflow-x: auto; overflow-y: auto; flex: 1; font-size: 13px; }
   .oc-custom-table table { min-width: 460px; width: 100%; border-collapse: collapse; table-layout: fixed; }
   .oc-custom-table thead tr { position: sticky; top: 0; z-index: 2; background: #f1f5f9; }
   .oc-custom-table th { padding: 8px 10px; font-weight: 600; font-size: 12px; color: #475569; border-bottom: 2px solid #e2e8f0; letter-spacing: 0.03em; }
@@ -182,7 +188,7 @@ const styles = scopeCss(`
   .oc-call-td .oc-actions { margin-right: auto; }
   .oc-put-td .oc-cell-inner { display: flex; align-items: center; justify-content: flex-start; gap: 4px; white-space: nowrap; width: 100%; }
   .oc-put-td .oc-actions { margin-left: auto; }
-  .chart-section { flex: 1; min-width: 0; background: #fff; padding: 25px; border-radius: 8px; box-shadow: 0 2px 10px rgba(0,0,0,.08); }
+  .chart-section { flex: 1 1 420px; min-width: 420px; width: 100%; background: #fff; padding: 25px; border-radius: 8px; box-shadow: 0 2px 10px rgba(0,0,0,.08); }
   .simulator-card { overflow: hidden; border: 1px solid #e5e7eb; border-radius: 8px; background: #fff; }
   .table-tabs-container { border-bottom: 1px solid #e5e7eb; overflow-x: auto; }
   .table-tabs { list-style: none; display: flex; align-items: center; min-width: max-content; }
@@ -198,7 +204,7 @@ const styles = scopeCss(`
   .breakeven-small { min-width: 180px; }
   .breakevan-box { font-size: 12px; font-weight: 700; color: #464646; white-space: nowrap; }
   .metrics-sub { font-size: 11px; margin-left: 4px; }
-  .chart-wrapper { position: relative; height: 600px; margin-bottom: 20px; }
+  .chart-wrapper { position: relative; height: 690px; margin-bottom: 20px; }
   .chart-wrapper canvas { display: block; width: 100% !important; height: 100% !important; }
   .payoff-tooltip { position: absolute; background: #1f2937; color: #f9fafb; border-radius: 8px; padding: 10px 14px; font-size: 12px; pointer-events: none; z-index: 20; min-width: 190px; box-shadow: 0 4px 20px rgba(0,0,0,.4); border: 1px solid rgba(255,255,255,.1); }
   .payoff-tooltip-title { font-size: 10px; font-weight: 600; color: #9ca3af; text-transform: uppercase; letter-spacing: .5px; margin-bottom: 7px; padding-bottom: 6px; border-bottom: 1px solid rgba(255,255,255,.1); }
@@ -309,7 +315,7 @@ const styles = scopeCss(`
   .pos-tab { padding: 10px 12px; font-size: 13px; color: #6b7280; cursor: pointer; border-bottom: 2px solid transparent; white-space: nowrap; background: none; border-top: none; border-left: none; border-right: none; font-family: inherit; }
   .pos-tab.active { color: #3b82f6; border-bottom-color: #3b82f6; font-weight: 500; }
   .pos-tab-right { margin-left: auto; display: flex; align-items: center; gap: 8px; padding: 0 4px; font-size: 12px; color: #6b7280; white-space: nowrap; }
-  .position_table { overflow-x: auto; overflow-y: auto; max-height: 260px; }
+  .position_table { overflow-x: auto; overflow-y: auto; flex: 1; }
   .position_table table { width: 100%; min-width: 700px; table-layout: fixed; border-collapse: collapse; }
   .position_table .sticky-top { position: sticky; top: 0; z-index: 2; }
   .position_table th { padding: 5px 4px; color: #9B9B9B; background-color: #fff !important; font-size: 12px; font-weight: 500; white-space: nowrap; text-align: left; }
@@ -364,6 +370,23 @@ const styles = scopeCss(`
   .pos-clear-all { font-size: 12px; color: #6b7280; cursor: pointer; text-decoration: none; margin-left: 6px; }
   .pos-footer-right { text-align: right; }
   .pos-empty { padding: 20px; text-align: center; color: #94a3b8; font-size: 13px; }
+
+  /* ── When chart wraps below (container < 760+420+20=1200px), cap panel height ── */
+  @media (max-width: 1260px) {
+    .option-chain-panel {
+      width: 100%;
+      min-width: unset;
+      height: auto;
+      max-height: 65vh;
+    }
+    .chart-section { padding: 16px; }
+    .chart-wrapper { height: 480px; }
+  }
+  @media (max-width: 640px) {
+    .chart-wrapper { height: 340px; }
+    .simulator-stats { flex-wrap: wrap; }
+    .simulator-stats > div { min-width: 50%; border-right: none !important; }
+  }
 `, ".sl-page");
 
 function scopeCss(css: string, scope: string): string {
@@ -393,14 +416,14 @@ function normalCDF(x: number): number {
 }
 
 function blackScholesCall(S: number, K: number, T: number, r: number, sigma: number): number {
-  if (T <= 0.001) return Math.max(0, S - K);
+  if (T <= 1e-6 || sigma <= 0) return Math.max(0, S - K);
   const d1 = (Math.log(S / K) + (r + 0.5 * sigma * sigma) * T) / (sigma * Math.sqrt(T));
   const d2 = d1 - sigma * Math.sqrt(T);
   return S * normalCDF(d1) - K * Math.exp(-r * T) * normalCDF(d2);
 }
 
 function blackScholesPut(S: number, K: number, T: number, r: number, sigma: number): number {
-  if (T <= 0.001) return Math.max(0, K - S);
+  if (T <= 1e-6 || sigma <= 0) return Math.max(0, K - S);
   const d1 = (Math.log(S / K) + (r + 0.5 * sigma * sigma) * T) / (sigma * Math.sqrt(T));
   const d2 = d1 - sigma * Math.sqrt(T);
   return K * Math.exp(-r * T) * normalCDF(-d2) - S * normalCDF(-d1);
@@ -452,7 +475,19 @@ function daysToExpiry(expiry: string, fromDate: Date): number {
   return Math.max(0, Math.ceil(diff / 86400000));
 }
 
-export default function SLSimulatorPage() {
+export default function AnalyseView({
+  entityType: type,
+  entityId: id,
+  replayTimestamp,
+  replayLtpMap,
+  replaySpotPrice,
+}: {
+  entityType: string;
+  entityId: string;
+  replayTimestamp?: string;
+  replayLtpMap?: Record<string, number>;
+  replaySpotPrice?: number;
+}) {
   const canvasRef = useRef<HTMLCanvasElement>(null);
   const chartRef = useRef<Chart | null>(null);
   const chartWrapperRef = useRef<HTMLDivElement>(null);
@@ -463,6 +498,8 @@ export default function SLSimulatorPage() {
   const dragRef = useRef<{ startPrice: number; startX: number; active: boolean }>({ startPrice: 0, startX: 0, active: false });
   const panelDragRef = useRef<{ active: boolean; offsetX: number; offsetY: number }>({ active: false, offsetX: 0, offsetY: 0 });
   const ocViewportRef = useRef<HTMLDivElement>(null);
+  const originalLegsRef = useRef<Leg[]>([]);
+  const optionLegsRef = useRef<Leg[]>([]);
 
   const [optionChainData, setOptionChainData] = useState<OptionChainRow[]>([]);
   const [currentSpotPrice, setCurrentSpotPrice] = useState(23589.5);
@@ -489,28 +526,26 @@ export default function SLSimulatorPage() {
   const [ocCarouselOffset, setOcCarouselOffset] = useState(0);
   const [ocAtmMode, setOcAtmMode] = useState<"Spot" | "Fut" | "SynthFut">("Spot");
   const [posActiveTab, setPosActiveTab] = useState<"Positions" | "Greeks" | "TargetPnL" | "Notes">("Positions");
+  const [leftTab, setLeftTab] = useState<"Positions" | "OptionChain">("Positions");
   const [multiplier, setMultiplier] = useState(1);
   const [summaryMeta, setSummaryMeta] = useState<SummaryMeta>({ marginBlocked: null });
 
   // ── API + Socket (same pattern as ExecutionView) ──────────────────────────
-  const { entityType: type, entityId: id } = useParams<{ entityType: string; entityId: string }>();
-  const reqRef          = useRef(0);
-  const fetchDataRef    = useRef<() => void>(() => {});
-  const updWsRef        = useRef<WebSocket | null>(null);
-  const exOrdWsRef      = useRef<WebSocket | null>(null);
-  const updReconnRef    = useRef<ReturnType<typeof setTimeout> | null>(null);
-  const exOrdReconnRef  = useRef<ReturnType<typeof setTimeout> | null>(null);
-  const underlyingRef       = useRef("");
-  const activationModeRef   = useRef("algo-backtest");   // updated from fetchData response
-  const listenTimestampRef  = useRef("");                // latest candle ts from websocket
-  const currentSpotPriceRef = useRef(0);
+  const reqRef = useRef(0);
+  const fetchDataRef = useRef<() => void>(() => { });
+  const updWsRef = useRef<WebSocket | null>(null);
+  const exOrdWsRef = useRef<WebSocket | null>(null);
+  const updReconnRef = useRef<ReturnType<typeof setTimeout> | null>(null);
+  const exOrdReconnRef = useRef<ReturnType<typeof setTimeout> | null>(null);
+  const underlyingRef = useRef("");
+  const activationModeRef = useRef("algo-backtest");   // updated from fetchData response
+  const listenTimestampRef = useRef("");                // latest candle ts from websocket
+  const currentSpotPriceRef = useRef(0);                // always in sync with currentSpotPrice state
   const [tokenLtpMap, setTokenLtpMap] = useState<Record<string, number>>({});
+  const tokenLtpMapRef = useRef<Record<string, number>>({});  // always in sync with tokenLtpMap state
+  const marginTimerRef = useRef<ReturnType<typeof setTimeout> | null>(null);
 
-  function recalcMarginLocal(
-    legs: { exited?: boolean; isQueued?: boolean; strike: number; expiry: string; optionType: string; type: string; quantity: number; lotSize: number; liveLtp?: number | null; premium: number }[],
-    underlying: string,
-    spotPrice: number,
-  ) {
+  function recalcMarginLocal(legs: Leg[], underlying: string, spotPrice: number, liveMap: Record<string, number> = {}) {
     if (!legs.length || !underlying) return;
     const positions: SpanPos[] = legs.map(leg => ({
       underlying,
@@ -518,12 +553,14 @@ export default function SLSimulatorPage() {
       expiry: leg.expiry,
       strike: leg.strike,
       transaction_type: leg.type === "Buy" ? "BUY" : "SELL",
-      quantity: leg.lotSize > 0 ? Math.round(leg.quantity / leg.lotSize) : leg.quantity,
+      quantity: leg.lotSize && leg.lotSize > 0 ? Math.round(leg.quantity / leg.lotSize) : leg.quantity,
       lot_size: leg.lotSize || 1,
-      ltp: leg.liveLtp ?? leg.premium ?? 0,
+      ltp: (leg.token && liveMap[leg.token] != null) ? liveMap[leg.token] : (leg.liveLtp ?? leg.premium ?? 0),
       spot: spotPrice || 0,
     }));
+    console.log("[MARGIN][AnalyseView] positions:", JSON.parse(JSON.stringify(positions)));
     const result = calculateMargin(positions);
+    console.log("[MARGIN][AnalyseView] result:", JSON.parse(JSON.stringify(result)));
     const net = result.net_margin > 0 ? result.net_margin : result.total_margin;
     if (net > 0) setSummaryMeta(prev => ({ ...prev, marginBlocked: net }));
   }
@@ -545,8 +582,8 @@ export default function SLSimulatorPage() {
       type === "portfolio"
         ? `strategy-trade-history/portfolio/${encodeURIComponent(id)}?status=${status}`
         : type === "group"
-        ? `strategy-trade-history/group/${encodeURIComponent(id)}?status=${status}`
-        : `strategy-trade-history/${encodeURIComponent(id)}?status=${status}`;
+          ? `strategy-trade-history/group/${encodeURIComponent(id)}?status=${status}`
+          : `strategy-trade-history/${encodeURIComponent(id)}?status=${status}`;
     const url = `${String(API_BASE || "").replace(/\/+$/, "")}/${path}`;
     fetch(url)
       .then(r => r.json())
@@ -566,40 +603,41 @@ export default function SLSimulatorPage() {
         const rawOpen: Record<string, unknown>[] = (legsBucket.open as Record<string, unknown>[]) ?? [];
         const rawQueued: Record<string, unknown>[] = (legsBucket.pending_feature_legs as Record<string, unknown>[]) ?? [];
         const rawClosed: Record<string, unknown>[] = (legsBucket.closed as Record<string, unknown>[]) ?? [];
-        const seenLegKeys = new Set<string>();
         const toAnalyseLeg = (
           leg: Record<string, unknown>,
           source: "open" | "pending_feature_legs" | "closed"
         ) => {
           const et = (leg.entry_trade ?? {}) as Record<string, unknown>;
-          const xt = (leg.exit_trade ?? {})  as Record<string, unknown>;
+          const xt = (leg.exit_trade ?? {}) as Record<string, unknown>;
           const optionToken = String(leg.option ?? leg.option_type ?? et.option_type ?? "CE").toUpperCase();
           const entryPrice = Number(leg.entry_price ?? et.price ?? et.trigger_price ?? 0) || 0;
           const exitPrice = Number(xt.price ?? xt.trigger_price ?? leg.exit_price ?? 0) || 0;
           const isQueued = source === "pending_feature_legs" || Boolean(leg.is_pending_feature_leg) || Number(leg.status ?? 1) === 0;
           const isExited = source === "closed" || (Object.keys(xt).length > 0 && exitPrice > 0);
           return {
-            token:      String(leg.token ?? et.instrument_token ?? "").trim(),
-            entryIv:    Number(et.entry_iv ?? leg.entry_iv ?? 0) || null,
+            token: String(leg.token ?? et.instrument_token ?? "").trim(),
+            entryIv: Number(et.entry_iv ?? leg.entry_iv ?? 0) || null,
             entryDate: normalizeDateTime(
               leg.queued_at ?? et.traded_timestamp ?? et.trigger_timestamp ?? leg.entry_timestamp ?? leg.entry_time ?? leg.created_at,
               new Date().toISOString()
             ),
-            exited:     isExited,
-            exitDate:   isExited ? normalizeDateTime(xt.traded_timestamp ?? xt.trigger_timestamp ?? leg.exit_timestamp, "") : "",
-            exitPrice:  isExited ? (exitPrice || null) : null,
-            expiry:     String(leg.expiry_date ?? leg.expiry ?? et.expiry ?? "").trim(),
+            exited: isExited,
+            exitDate: isExited ? normalizeDateTime(xt.traded_timestamp ?? xt.trigger_timestamp ?? leg.exit_timestamp, "") : "",
+            exitPrice: isExited ? (exitPrice || null) : null,
+            expiry: String(leg.expiry_date ?? leg.expiry ?? et.expiry ?? "").trim(),
             includeInPnl: !isQueued,
             isQueued,
             liveLtp: Number(leg.last_saw_price ?? leg.mark_price ?? 0) || null,
+            apiPnl: Number(leg.pnl ?? 0),
+            apiLtp: Number(leg.last_saw_price ?? leg.mark_price ?? 0) || null,
             lotSize: Number(leg.lot_size ?? et.lot_size ?? 0) || 0,
             optionType: (optionToken === "PE" ? "Put" : "Call") as "Call" | "Put",
-            premium:    isQueued ? 0 : entryPrice,
+            premium: isQueued ? 0 : entryPrice,
             queueLotValue: Number(leg.lot_config_value ?? leg.lots ?? 0) || 0,
             queuedAt: isQueued ? normalizeDateTime(leg.queued_at ?? leg.armed_at ?? leg.created_at, "") : "",
-            quantity:   Number(leg.effective_quantity ?? leg.quantity ?? 0) || 0,
-            strike:     Number(leg.strike ?? et.strike ?? leg.strike_price ?? 0) || 0,
-            type:       (String(leg.position_side ?? leg.position ?? "sell").toLowerCase() === "buy" ? "Buy" : "Sell") as "Buy" | "Sell",
+            quantity: Number(leg.effective_quantity ?? leg.quantity ?? 0) || 0,
+            strike: Number(leg.strike ?? et.strike ?? leg.strike_price ?? 0) || 0,
+            type: (String(leg.position_side ?? leg.position ?? "sell").toLowerCase() === "buy" ? "Buy" : "Sell") as "Buy" | "Sell",
           };
         };
         const legs = [...rawOpen, ...rawQueued, ...rawClosed]
@@ -609,21 +647,11 @@ export default function SLSimulatorPage() {
               : (rawClosed.includes(leg) ? "closed" : "open");
             return toAnalyseLeg(leg, source);
           })
-          .filter((leg) => {
-            const key = [
-              leg.token || "",
-              leg.strike,
-              leg.expiry,
-              leg.entryDate,
-              leg.exited ? "closed" : (leg.isQueued ? "queued" : "open"),
-            ].join("|");
-            if (!leg.strike || !leg.expiry || seenLegKeys.has(key)) return false;
-            seenLegKeys.add(key);
-            return true;
-          });
+          .filter((leg) => leg.strike > 0 && leg.expiry);
         setOptionLegs(legs);
+        originalLegsRef.current = legs;
 
-        // Calculate margin locally — triggered by execute_order socket or initial load
+        // Calculate margin locally using spanMargin.ts — triggered by execute_order socket or initial load
         const effectiveUnderlying = ul || underlyingRef.current;
         const openForMargin = legs.filter(l => !l.exited && !l.isQueued && l.strike > 0 && l.expiry);
         if (openForMargin.length && effectiveUnderlying) {
@@ -631,11 +659,59 @@ export default function SLSimulatorPage() {
           recalcMarginLocal(openForMargin, effectiveUnderlying, liveSpot);
         }
       })
-      .catch(() => {});
+      .catch(() => { });
   }, [type, id]);
 
   useEffect(() => { fetchDataRef.current = fetchData; }, [fetchData]);
   useEffect(() => { fetchData(); }, [fetchData]);
+
+  // keep refs in sync so socket handlers can read latest values without stale closure
+  useEffect(() => { optionLegsRef.current = optionLegs; }, [optionLegs]);
+  useEffect(() => { tokenLtpMapRef.current = tokenLtpMap; }, [tokenLtpMap]);
+
+  // ── Replay: filter legs by timestamp ────────────────────────────────────────
+  useEffect(() => {
+    if (!replayTimestamp) {
+      if (originalLegsRef.current.length) setOptionLegs(originalLegsRef.current);
+      return;
+    }
+    const replayTs = new Date(replayTimestamp.replace(" ", "T"));
+    const filtered = originalLegsRef.current
+      .filter(leg => {
+        const entryDt = new Date((leg.entryDate || "").replace(" ", "T"));
+        return !isNaN(entryDt.getTime()) ? entryDt <= replayTs : true;
+      })
+      .map(leg => {
+        const exitDt = leg.exitDate ? new Date(leg.exitDate.replace(" ", "T")) : null;
+        if (leg.exited && exitDt && exitDt > replayTs) {
+          return { ...leg, exited: false, exitPrice: null, exitDate: "", exitDelta: null };
+        }
+        return leg;
+      });
+    setOptionLegs(filtered);
+  }, [replayTimestamp]);
+
+  // ── Replay: override LTP map ────────────────────────────────────────────────
+  useEffect(() => {
+    if (replayLtpMap && Object.keys(replayLtpMap).length > 0) {
+      setTokenLtpMap(replayLtpMap);
+    }
+  }, [replayLtpMap]);
+
+  // ── Replay: currentMarketTime drives T (time-to-expiry) in Black-Scholes ───
+  useEffect(() => {
+    if (replayTimestamp) {
+      setCurrentMarketTime(new Date(replayTimestamp.replace(" ", "T")));
+    }
+  }, [replayTimestamp]);
+
+  // ── Replay: spot price drives currentSpotPrice (spot line + IV calc) ────────
+  useEffect(() => {
+    if (replaySpotPrice && replaySpotPrice > 0) {
+      setCurrentSpotPrice(replaySpotPrice);
+      setUserCustomZoom(false);
+    }
+  }, [replaySpotPrice]);
 
   useEffect(() => {
     const SUB = JSON.stringify({ activation_mode: "algo-backtest", status: "algo-backtest", reason: "subscribe" });
@@ -708,7 +784,16 @@ export default function SLSimulatorPage() {
       ws.onopen = () => ws.send(SUB);
       ws.onmessage = e => {
         let p: Record<string, unknown>; try { p = JSON.parse(e.data); } catch { return; }
-        if (p.type === "execute_order") fetchDataRef.current();
+        if (p.type === "execute_order") {
+          fetchDataRef.current();
+          // recalc margin after 500ms so latest LTP prices are already in tokenLtpMapRef
+          if (marginTimerRef.current) clearTimeout(marginTimerRef.current);
+          marginTimerRef.current = setTimeout(() => {
+            const openLegs = optionLegsRef.current.filter(l => !l.exited && !l.isQueued && l.strike > 0 && l.expiry);
+            if (!openLegs.length || !underlyingRef.current) return;
+            recalcMarginLocal(openLegs, underlyingRef.current, currentSpotPriceRef.current, tokenLtpMapRef.current);
+          }, 500);
+        }
       };
       ws.onclose = () => { if (exOrdWsRef.current !== ws) return; exOrdReconnRef.current = setTimeout(connectExOrd, 3000); };
     }
@@ -716,9 +801,9 @@ export default function SLSimulatorPage() {
     connectUpd();
     connectExOrd();
     return () => {
-      if (updReconnRef.current)   clearTimeout(updReconnRef.current);
+      if (updReconnRef.current) clearTimeout(updReconnRef.current);
       if (exOrdReconnRef.current) clearTimeout(exOrdReconnRef.current);
-      const upd = updWsRef.current;   updWsRef.current   = null; upd?.close();
+      const upd = updWsRef.current; updWsRef.current = null; upd?.close();
       const exo = exOrdWsRef.current; exOrdWsRef.current = null; exo?.close();
     };
   }, []); // eslint-disable-line react-hooks/exhaustive-deps
@@ -747,8 +832,13 @@ export default function SLSimulatorPage() {
         const rows = Array.isArray(json.option_chain) ? (json.option_chain as OptionChainRow[]) : [];
         if (!rows.length) return;
         setOptionChainData(rows);
+        // Only initialise spot price on first load (currentSpotPrice === 0).
+        // Subsequent polls must not touch spot price — that would trigger a
+        // full payoff chart re-render via currentSpotPrice in chart useEffect deps.
         const spotFromResp = Number(json.spot_price ?? 0);
-        if (spotFromResp > 0) setCurrentSpotPrice(spotFromResp);
+        if (spotFromResp > 0 && !currentSpotPriceRef.current) {
+          setCurrentSpotPrice(spotFromResp);
+        }
         // selectedExpiry reset is handled by the expiries useEffect below
       } catch {
         // silent — polling failure must not affect position socket loop
@@ -825,16 +915,16 @@ export default function SLSimulatorPage() {
     );
 
     const rawStart = Math.floor((lo - padding) / 50) * 50;
-    const rawEnd   = Math.ceil((hi + padding) / 50) * 50;
+    const rawEnd = Math.ceil((hi + padding) / 50) * 50;
 
     // Guarantee minimum width: at least 1.5SD on each side of spot
     const oneSd = Math.ceil(getOneSdMove(spotPrice) / 50) * 50 || 600;
     const minStart = Math.floor((spotPrice - oneSd * 1.5) / 50) * 50;
-    const minEnd   = Math.ceil((spotPrice + oneSd * 1.5) / 50) * 50;
+    const minEnd = Math.ceil((spotPrice + oneSd * 1.5) / 50) * 50;
 
     return {
       start: Math.min(rawStart, minStart),
-      end:   Math.max(rawEnd, minEnd),
+      end: Math.max(rawEnd, minEnd),
     };
   }
 
@@ -1097,7 +1187,7 @@ export default function SLSimulatorPage() {
       setZoomStartPrice(range.start);
       setZoomEndPrice(range.end);
     }
-  }, [optionChainData, optionLegs, currentSpotPrice, zoomEndPrice, zoomStartPrice]);
+  }, [optionLegs, currentSpotPrice, zoomEndPrice, zoomStartPrice]);
 
   useEffect(() => {
     if (!userCustomZoom) {
@@ -1105,7 +1195,7 @@ export default function SLSimulatorPage() {
       setZoomStartPrice(range.start);
       setZoomEndPrice(range.end);
     }
-  }, [currentSpotPrice, optionChainData, optionLegs, selectedExpiry, userCustomZoom]);
+  }, [currentSpotPrice, optionLegs, selectedExpiry, userCustomZoom]);
 
   // frozenAdjLevels is only set when user explicitly requests adjustment — not auto-triggered
   useEffect(() => {
@@ -1199,7 +1289,7 @@ export default function SLSimulatorPage() {
       (chartRef.current.options.scales as any).yOI.min = -oiAxisMax;
       (chartRef.current.options.scales as any).yOI.max = oiAxisMax;
       (chartRef.current.options.plugins as any).tooltip.external = externalTooltip;
-      chartRef.current.update();
+      chartRef.current.update("none");
     } else {
       chartRef.current = new Chart(ctx, {
         type: "bar",
@@ -1351,7 +1441,27 @@ export default function SLSimulatorPage() {
       chartRef.current?.update("none");
       syncChartArea();
     });
-  }, [currentMarketTime, currentSpotPrice, ivShiftPct, optionChainData, optionLegs, riskFreeRate, selectedExpiry, tokenLtpMap, zoomEndPrice, zoomStartPrice]);
+  }, [currentMarketTime, currentSpotPrice, ivShiftPct, optionLegs, riskFreeRate, selectedExpiry, tokenLtpMap, zoomEndPrice, zoomStartPrice]);
+
+  // OI-only update — only updates OI bar datasets[0,1] with no animation.
+  // Does NOT touch payoff line datasets[2,3] → payoff chart visually unchanged.
+  // eslint-disable-next-line react-hooks/exhaustive-deps
+  useEffect(() => {
+    const chart = chartRef.current;
+    const priceRange = pnlPriceRangeRef.current;
+    if (!chart || !priceRange.length) return;
+    const putOI = generateOIData(priceRange, false);
+    const callOI = generateOIData(priceRange, true);
+    putOIRef.current = putOI;
+    callOIRef.current = callOI;
+    const maxOI = Math.max(...putOI, ...callOI, 0);
+    const oiAxisMax = Math.ceil((maxOI * 1.2) / 5000) * 5000 || 5000;
+    chart.data.datasets[0].data = putOI as any;
+    chart.data.datasets[1].data = callOI as any;
+    (chart.options.scales as any).yOI.min = -oiAxisMax;
+    (chart.options.scales as any).yOI.max = oiAxisMax;
+    chart.update("none");
+  }, [optionChainData, selectedExpiry]);
 
   useEffect(() => {
     const wrapper = chartWrapperRef.current;
@@ -1541,18 +1651,29 @@ export default function SLSimulatorPage() {
     if (leg.isQueued) return 0;
     if (leg.exited && leg.exitPrice != null) return leg.exitPrice;
     const tok = leg.token?.trim();
+    if (tok && replayLtpMap) {
+      const v = replayLtpMap[tok] ?? replayLtpMap[`NSE_${tok}`] ?? replayLtpMap[tok.replace(/^NSE_/i, "")];
+      if (v != null) return v;
+    }
     if (tok && tokenLtpMap[tok] != null) return tokenLtpMap[tok];
     if (leg.liveLtp != null) return leg.liveLtp;
+    if (leg.apiLtp != null) return leg.apiLtp;
     return getLTP(leg.strike, leg.expiry, leg.optionType) ?? leg.premium;
   }
 
   function getLegPnl(leg: Leg): number {
     if (leg.includeInPnl === false || leg.isQueued) return 0;
     if (leg.exited) {
+      // Use API's pre-computed PnL for closed legs — matches Execution page exactly
+      if (leg.apiPnl !== undefined && leg.apiPnl !== 0) return leg.apiPnl;
       return leg.type === "Buy"
         ? ((leg.exitPrice ?? leg.premium) - leg.premium) * leg.quantity
         : (leg.premium - (leg.exitPrice ?? leg.premium)) * leg.quantity;
     }
+    // Open leg: use live LTP from socket; fall back to apiPnl when no live data
+    const tok = leg.token?.trim();
+    const hasLiveLtp = (tok && tokenLtpMap[tok] != null) || leg.liveLtp != null || leg.apiLtp != null;
+    if (!hasLiveLtp && leg.apiPnl !== undefined) return leg.apiPnl;
     const ltp = getLegLTP(leg);
     return leg.type === "Buy"
       ? (ltp - leg.premium) * leg.quantity
@@ -1638,8 +1759,8 @@ export default function SLSimulatorPage() {
   const rrValue = !isUnlimitedProfit && !isUnlimitedLoss && maxProfitValue > 0 && maxLossValue < 0 ? Math.abs(maxLossValue) / maxProfitValue : 0;
   const rrLabel = isUnlimitedProfit && maxLossValue < 0 ? "∞:1"
     : isUnlimitedLoss && maxProfitValue > 0 ? "1:∞"
-    : maxProfitValue > 0 && maxLossValue < 0 ? `1:${rrValue.toFixed(rrValue >= 10 ? 0 : 1)}`
-    : "—";
+      : maxProfitValue > 0 && maxLossValue < 0 ? `1:${rrValue.toFixed(rrValue >= 10 ? 0 : 1)}`
+        : "—";
 
   // Use nearest open leg expiry for SD (legs may have a different expiry than the option chain)
   const nearestLegExpiry = [...new Set(activeOpenLegs.map(l => l.expiry))].sort()[0]
@@ -1648,11 +1769,11 @@ export default function SLSimulatorPage() {
   const oneSdMove = sdExpiry ? getOneSdMove(currentSpotPrice, sdExpiry) : 0;
   const sdGuideLevels = sdExpiry && oneSdMove > 0
     ? [
-        { label: "-2SD", price: currentSpotPrice - oneSdMove * 2 },
-        { label: "-1SD", price: currentSpotPrice - oneSdMove },
-        { label: "+1SD", price: currentSpotPrice + oneSdMove },
-        { label: "+2SD", price: currentSpotPrice + oneSdMove * 2 },
-      ].filter((item) => Number.isFinite(item.price) && item.price > 0)
+      { label: "-2SD", price: currentSpotPrice - oneSdMove * 2 },
+      { label: "-1SD", price: currentSpotPrice - oneSdMove },
+      { label: "+1SD", price: currentSpotPrice + oneSdMove },
+      { label: "+2SD", price: currentSpotPrice + oneSdMove * 2 },
+    ].filter((item) => Number.isFinite(item.price) && item.price > 0)
     : [];
 
   function fmtEntryDate(dateStr: string): string {
@@ -1799,200 +1920,403 @@ export default function SLSimulatorPage() {
       <div className="main-container">
         <div className="option-chain-panel">
 
-          {/* ── Header ── */}
-          <div className="oc-header">
-            <span className="oc-header-left">🗂 Add ons ▼</span>
-            <span className="oc-title">
-              Option Chain
-              <span className="oc-expiry-label">
-                {selectedExpiry ? ` (${formatExpiryLabel(selectedExpiry)})` : ""}
+          {/* ── Left Panel Tabs ── */}
+          <div className="left-panel-tabs">
+            <button type="button" className={`left-panel-tab${leftTab === "Positions" ? " active" : ""}`} onClick={() => setLeftTab("Positions")}>Positions</button>
+            <button type="button" className={`left-panel-tab${leftTab === "OptionChain" ? " active" : ""}`} onClick={() => setLeftTab("OptionChain")}>Option Chain</button>
+          </div>
+
+          {leftTab === "OptionChain" && (<>
+            {/* ── Header ── */}
+            <div className="oc-header">
+              <span className="oc-header-left">🗂 Add ons ▼</span>
+              <span className="oc-title">
+                Option Chain
+                <span className="oc-expiry-label">
+                  {selectedExpiry ? ` (${formatExpiryLabel(selectedExpiry)})` : ""}
+                </span>
               </span>
-            </span>
-            <button className="oc-hide-btn" type="button">⟪ Hide</button>
-          </div>
+              <button className="oc-hide-btn" type="button">⟪ Hide</button>
+            </div>
 
-          {/* ── Expiry carousel ── */}
-          <div className="expiry__viewer expiry-carousel">
-            <button
-              type="button"
-              className="expiry-carousel__arrow"
-              disabled={ocCarouselOffset <= 0}
-              onClick={() => setOcCarouselOffset((o) => Math.max(0, o - OC_CAROUSEL_STEP))}
-            >&#8249;</button>
-            <div className="expiry-carousel__viewport" ref={ocViewportRef}>
-              <div
-                className="expiry-carousel__track"
-                style={{ transform: `translateX(-${ocCarouselOffset}px)` }}
-              >
-                {expiries.map((exp, idx) => (
-                  <div
-                    key={exp}
-                    className={`expiry_button${exp === selectedExpiry ? " selected__oc__expiry" : ""}`}
-                    onClick={() => {
-                      setSelectedExpiry(exp);
-                      if (!userCustomZoom) {
-                        const range = calcZoomRange(currentSpotPrice);
-                        setZoomStartPrice(range.start);
-                        setZoomEndPrice(range.end);
-                      }
-                    }}
-                  >
-                    <button type="button">{formatExpiryLabel(exp)}</button>
-                    <div className="expiry_indicator">({dteSuffix(exp, idx)})</div>
-                  </div>
-                ))}
+            {/* ── Expiry carousel ── */}
+            <div className="expiry__viewer expiry-carousel">
+              <button
+                type="button"
+                className="expiry-carousel__arrow"
+                disabled={ocCarouselOffset <= 0}
+                onClick={() => setOcCarouselOffset((o) => Math.max(0, o - OC_CAROUSEL_STEP))}
+              >&#8249;</button>
+              <div className="expiry-carousel__viewport" ref={ocViewportRef}>
+                <div
+                  className="expiry-carousel__track"
+                  style={{ transform: `translateX(-${ocCarouselOffset}px)` }}
+                >
+                  {expiries.map((exp, idx) => (
+                    <div
+                      key={exp}
+                      className={`expiry_button${exp === selectedExpiry ? " selected__oc__expiry" : ""}`}
+                      onClick={() => {
+                        setSelectedExpiry(exp);
+                        if (!userCustomZoom) {
+                          const range = calcZoomRange(currentSpotPrice);
+                          setZoomStartPrice(range.start);
+                          setZoomEndPrice(range.end);
+                        }
+                      }}
+                    >
+                      <button type="button">{formatExpiryLabel(exp)}</button>
+                      <div className="expiry_indicator">({dteSuffix(exp, idx)})</div>
+                    </div>
+                  ))}
+                </div>
+              </div>
+              <button
+                type="button"
+                className="expiry-carousel__arrow"
+                disabled={ocCarouselOffset >= ocMaxCarouselOffset}
+                onClick={() => setOcCarouselOffset((o) => Math.min(ocMaxCarouselOffset, o + OC_CAROUSEL_STEP))}
+              >&#8250;</button>
+            </div>
+
+            {/* ── Filter row 1: ATM IV | ATM mode | Straddle Prem ── */}
+            <div className="oc_filter">
+              <div>
+                ATM IV:&nbsp;
+                <span style={{ color: "#464646", fontWeight: 500 }}>{atmIv.toFixed(0)}</span>
+              </div>
+              <div>
+                <span style={{ marginRight: 6 }}>ATM:</span>
+                <div className="squar__off__type">
+                  {(["Spot", "Fut", "SynthFut"] as const).map((mode) => (
+                    <label
+                      key={mode}
+                      className={`atm-radio-label${ocAtmMode === mode ? " atm-radio-active" : ""}`}
+                      onClick={() => setOcAtmMode(mode)}
+                    >
+                      <span className="atm-radio-dot" />
+                      <span className="atm-radio-title">{mode === "SynthFut" ? "Synth Fut" : mode}</span>
+                    </label>
+                  ))}
+                </div>
+              </div>
+              <div>
+                Straddle Prem:&nbsp;
+                <span style={{ color: "#464646", fontWeight: 500 }}>{straddlePremium.toFixed(2)}</span>
               </div>
             </div>
-            <button
-              type="button"
-              className="expiry-carousel__arrow"
-              disabled={ocCarouselOffset >= ocMaxCarouselOffset}
-              onClick={() => setOcCarouselOffset((o) => Math.min(ocMaxCarouselOffset, o + OC_CAROUSEL_STEP))}
-            >&#8250;</button>
-          </div>
 
-          {/* ── Filter row 1: ATM IV | ATM mode | Straddle Prem ── */}
-          <div className="oc_filter">
-            <div>
-              ATM IV:&nbsp;
-              <span style={{ color: "#464646", fontWeight: 500 }}>{atmIv.toFixed(0)}</span>
-            </div>
-            <div>
-              <span style={{ marginRight: 6 }}>ATM:</span>
-              <div className="squar__off__type">
-                {(["Spot", "Fut", "SynthFut"] as const).map((mode) => (
-                  <label
-                    key={mode}
-                    className={`atm-radio-label${ocAtmMode === mode ? " atm-radio-active" : ""}`}
-                    onClick={() => setOcAtmMode(mode)}
-                  >
-                    <span className="atm-radio-dot" />
-                    <span className="atm-radio-title">{mode === "SynthFut" ? "Synth Fut" : mode}</span>
-                  </label>
-                ))}
+            {/* ── Filter row 2: PCR | OI strip | Max Pain ── */}
+            <div className="oc_filter">
+              <div>
+                PCR:&nbsp;
+                <span style={{ color: "#464646", fontWeight: 500 }}>{pcr.toFixed(2)}</span>
+              </div>
+              <div className="total_oi">
+                <div className="total_call_oi">{fmtOI(totalCallOi)}</div>
+                <div className="oi-progress"><div className="oi-progress-call" /></div>
+                <span>OI</span>
+                <div className="oi-progress"><div className="oi-progress-put" /></div>
+                <div className="total_put_oi">{fmtOI(totalPutOi)}</div>
+              </div>
+              <div>
+                Max Pain:&nbsp;
+                <span style={{ color: "#464646", fontWeight: 500 }}>{maxPain || "—"}</span>
               </div>
             </div>
-            <div>
-              Straddle Prem:&nbsp;
-              <span style={{ color: "#464646", fontWeight: 500 }}>{straddlePremium.toFixed(2)}</span>
-            </div>
-          </div>
 
-          {/* ── Filter row 2: PCR | OI strip | Max Pain ── */}
-          <div className="oc_filter">
-            <div>
-              PCR:&nbsp;
-              <span style={{ color: "#464646", fontWeight: 500 }}>{pcr.toFixed(2)}</span>
+            {/* ── Table ── */}
+            <div className="oc-custom-table">
+              <table>
+                <thead>
+                  <tr>
+                    <th className="oc-call-head">Call LTP <span className="oc-head-delta">(Δ)</span></th>
+                    <th className="oc-call-oi-head">Call OI</th>
+                    <th className="oc-iv-head">IV</th>
+                    <th className="oc-strike-head">Strike</th>
+                    <th className="oc-put-oi-head">Put OI</th>
+                    <th className="oc-put-head">Put LTP <span className="oc-head-delta">(Δ)</span></th>
+                  </tr>
+                </thead>
+                <tbody>
+                  {optionChainView.map(({ call, put, strike }) => {
+                    const isAtm = strike === atmStrike;
+                    const isCallItm = strike < currentSpotPrice;
+                    const isPutItm = strike > currentSpotPrice;
+                    const callOI = call?.oi || 0;
+                    const putOI = put?.oi || 0;
+                    const callOIPct = `${((callOI / maxCallOI) * 100).toFixed(1)}%`;
+                    const putOIPct = `${((putOI / maxPutOI) * 100).toFixed(1)}%`;
+                    const callIV = call?.iv || 0;
+                    const putIV = put?.iv || 0;
+                    const combinedIV = callIV && putIV ? (callIV + putIV) / 2 : callIV || putIV;
+                    const buyCallActive = hasOcPos(strike, "Call", "Buy");
+                    const sellCallActive = hasOcPos(strike, "Call", "Sell");
+                    const buyPutActive = hasOcPos(strike, "Put", "Buy");
+                    const sellPutActive = hasOcPos(strike, "Put", "Sell");
+                    const buyCallCount = countOcPos(strike, "Call", "Buy");
+                    const sellCallCount = countOcPos(strike, "Call", "Sell");
+                    const buyPutCount = countOcPos(strike, "Put", "Buy");
+                    const sellPutCount = countOcPos(strike, "Put", "Sell");
+                    let rowCls = "oc-row";
+                    if (isAtm) rowCls += " oc-atm";
+                    else if (isCallItm) rowCls += " oc-call-itm";
+                    else if (isPutItm) rowCls += " oc-put-itm";
+                    return (
+                      <tr key={strike} className={rowCls}>
+                        {/* Call LTP — [B][S] left, ltp delta right */}
+                        <td className="oc-call-td">
+                          <div className="oc-cell-inner">
+                            <div className={`oc-actions action_button${buyCallActive || sellCallActive ? " has-active" : ""}`}>
+                              <span className="oc-btn-wrap">
+                                <button type="button" className={`buy_button${buyCallActive ? " oc-btn-active" : ""}`} onClick={() => toggleOcPos(strike, "Call", "Buy", call?.close || 0)}>B</button>
+                                {buyCallCount > 0 && <span className="oc-pos-count buy">{buyCallCount}</span>}
+                              </span>
+                              <span className="oc-btn-wrap">
+                                <button type="button" className={`sell_button${sellCallActive ? " oc-btn-active" : ""}`} onClick={() => toggleOcPos(strike, "Call", "Sell", call?.close || 0)}>S</button>
+                                {sellCallCount > 0 && <span className="oc-pos-count sell">{sellCallCount}</span>}
+                              </span>
+                            </div>
+                            {call ? (<><span className="oc-ltp">{call.close.toFixed(2)}</span><span className="oc-delta">({call.delta != null ? call.delta.toFixed(2) : "—"})</span></>) : <span className="oc-empty">—</span>}
+                          </div>
+                        </td>
+                        {/* Call OI — bar fills right-to-left */}
+                        <td className="oc-call-oi-td">
+                          <div className="oc-oi-value oc-oi-call">{fmtOI(callOI)}</div>
+                          <div className="oc-oi-bar-wrap"><div className="oc-oi-bar oc-oi-bar-call" style={{ width: callOIPct }} /></div>
+                        </td>
+                        {/* IV */}
+                        <td className="oc-iv-td">
+                          {combinedIV ? <span className="oc-iv-value">{(combinedIV * 100).toFixed(2)}%</span> : <span className="oc-empty">—</span>}
+                        </td>
+                        {/* Strike */}
+                        <td className="oc-strike-td">{strike}</td>
+                        {/* Put OI — bar fills left-to-right */}
+                        <td className="oc-put-oi-td">
+                          <div className="oc-oi-value oc-oi-put">{fmtOI(putOI)}</div>
+                          <div className="oc-oi-bar-wrap"><div className="oc-oi-bar oc-oi-bar-put" style={{ width: putOIPct }} /></div>
+                        </td>
+                        {/* Put LTP — ltp delta left, [B][S] right */}
+                        <td className="oc-put-td">
+                          <div className="oc-cell-inner">
+                            {put ? (<><span className="oc-ltp">{put.close.toFixed(2)}</span><span className="oc-delta">({put.delta != null ? put.delta.toFixed(2) : "—"})</span></>) : <span className="oc-empty">—</span>}
+                            <div className={`oc-actions action_button${buyPutActive || sellPutActive ? " has-active" : ""}`}>
+                              <span className="oc-btn-wrap">
+                                <button type="button" className={`buy_button${buyPutActive ? " oc-btn-active" : ""}`} onClick={() => toggleOcPos(strike, "Put", "Buy", put?.close || 0)}>B</button>
+                                {buyPutCount > 0 && <span className="oc-pos-count buy">{buyPutCount}</span>}
+                              </span>
+                              <span className="oc-btn-wrap">
+                                <button type="button" className={`sell_button${sellPutActive ? " oc-btn-active" : ""}`} onClick={() => toggleOcPos(strike, "Put", "Sell", put?.close || 0)}>S</button>
+                                {sellPutCount > 0 && <span className="oc-pos-count sell">{sellPutCount}</span>}
+                              </span>
+                            </div>
+                          </div>
+                        </td>
+                      </tr>
+                    );
+                  })}
+                </tbody>
+              </table>
             </div>
-            <div className="total_oi">
-              <div className="total_call_oi">{fmtOI(totalCallOi)}</div>
-              <div className="oi-progress"><div className="oi-progress-call" /></div>
-              <span>OI</span>
-              <div className="oi-progress"><div className="oi-progress-put" /></div>
-              <div className="total_put_oi">{fmtOI(totalPutOi)}</div>
-            </div>
-            <div>
-              Max Pain:&nbsp;
-              <span style={{ color: "#464646", fontWeight: 500 }}>{maxPain || "—"}</span>
-            </div>
-          </div>
+          </>)}
 
-          {/* ── Table ── */}
-          <div className="oc-custom-table">
-            <table>
-              <thead>
-                <tr>
-                  <th className="oc-call-head">Call LTP <span className="oc-head-delta">(Δ)</span></th>
-                  <th className="oc-call-oi-head">Call OI</th>
-                  <th className="oc-iv-head">IV</th>
-                  <th className="oc-strike-head">Strike</th>
-                  <th className="oc-put-oi-head">Put OI</th>
-                  <th className="oc-put-head">Put LTP <span className="oc-head-delta">(Δ)</span></th>
-                </tr>
-              </thead>
-              <tbody>
-                {optionChainView.map(({ call, put, strike }) => {
-                  const isAtm = strike === atmStrike;
-                  const isCallItm = strike < currentSpotPrice;
-                  const isPutItm = strike > currentSpotPrice;
-                  const callOI = call?.oi || 0;
-                  const putOI = put?.oi || 0;
-                  const callOIPct = `${((callOI / maxCallOI) * 100).toFixed(1)}%`;
-                  const putOIPct = `${((putOI / maxPutOI) * 100).toFixed(1)}%`;
-                  const callIV = call?.iv || 0;
-                  const putIV = put?.iv || 0;
-                  const combinedIV = callIV && putIV ? (callIV + putIV) / 2 : callIV || putIV;
-                  const buyCallActive = hasOcPos(strike, "Call", "Buy");
-                  const sellCallActive = hasOcPos(strike, "Call", "Sell");
-                  const buyPutActive = hasOcPos(strike, "Put", "Buy");
-                  const sellPutActive = hasOcPos(strike, "Put", "Sell");
-                  const buyCallCount = countOcPos(strike, "Call", "Buy");
-                  const sellCallCount = countOcPos(strike, "Call", "Sell");
-                  const buyPutCount = countOcPos(strike, "Put", "Buy");
-                  const sellPutCount = countOcPos(strike, "Put", "Sell");
-                  let rowCls = "oc-row";
-                  if (isAtm) rowCls += " oc-atm";
-                  else if (isCallItm) rowCls += " oc-call-itm";
-                  else if (isPutItm) rowCls += " oc-put-itm";
-                  return (
-                    <tr key={strike} className={rowCls}>
-                      {/* Call LTP — [B][S] left, ltp delta right */}
-                      <td className="oc-call-td">
-                        <div className="oc-cell-inner">
-                          <div className={`oc-actions action_button${buyCallActive || sellCallActive ? " has-active" : ""}`}>
-                            <span className="oc-btn-wrap">
-                              <button type="button" className={`buy_button${buyCallActive ? " oc-btn-active" : ""}`} onClick={() => toggleOcPos(strike, "Call", "Buy", call?.close || 0)}>B</button>
-                              {buyCallCount > 0 && <span className="oc-pos-count buy">{buyCallCount}</span>}
-                            </span>
-                            <span className="oc-btn-wrap">
-                              <button type="button" className={`sell_button${sellCallActive ? " oc-btn-active" : ""}`} onClick={() => toggleOcPos(strike, "Call", "Sell", call?.close || 0)}>S</button>
-                              {sellCallCount > 0 && <span className="oc-pos-count sell">{sellCallCount}</span>}
-                            </span>
+          {leftTab === "Positions" && (
+            <div style={{ flex: 1, display: "flex", flexDirection: "column", overflowY: "hidden", overflowX: "auto" }}>
+              <div className="pos-tabs">
+                {(["Positions", "Greeks", "TargetPnL", "Notes"] as const).map((tab) => (
+                  <button key={tab} type="button"
+                    className={`pos-tab${posActiveTab === tab ? " active" : ""}`}
+                    onClick={() => setPosActiveTab(tab)}
+                  >
+                    {tab === "TargetPnL" ? "Target P&L (blue line)" : tab}
+                  </button>
+                ))}
+                <div className="pos-tab-right">Add Notes&nbsp;&nbsp;|&nbsp;&nbsp;Add ons ▾</div>
+              </div>
+
+              {posActiveTab === "Positions" && (
+                <div className="position_table">
+                  <table style={{ width: "100%", minWidth: 700, tableLayout: "fixed" }}>
+                    <colgroup>
+                      <col style={{ width: 65 }} /><col style={{ width: 72 }} /><col style={{ width: "5%" }} />
+                      <col style={{ width: 90 }} /><col style={{ width: 78 }} /><col style={{ width: 80 }} />
+                      <col style={{ width: "8%" }} /><col style={{ width: "8%" }} /><col style={{ width: "6%" }} />
+                      <col style={{ width: "13%" }} /><col style={{ width: 105 }} />
+                    </colgroup>
+                    <thead>
+                      <tr className="sticky-top">
+                        <th className="action_head" style={{ padding: 0 }}>
+                          <div className="action_button_group" style={{ paddingLeft: 4 }}>
+                            <label className="checkbox-container-pt"><span className="checkbox-custom-pt checked" /></label>
+                            <span style={{ width: 18, display: "inline-block" }} />
                           </div>
-                          {call ? (<><span className="oc-ltp">{call.close.toFixed(2)}</span><span className="oc-delta">({call.delta != null ? call.delta.toFixed(2) : "—"})</span></>) : <span className="oc-empty">—</span>}
-                        </div>
-                      </td>
-                      {/* Call OI — bar fills right-to-left */}
-                      <td className="oc-call-oi-td">
-                        <div className="oc-oi-value oc-oi-call">{fmtOI(callOI)}</div>
-                        <div className="oc-oi-bar-wrap"><div className="oc-oi-bar oc-oi-bar-call" style={{ width: callOIPct }} /></div>
-                      </td>
-                      {/* IV */}
-                      <td className="oc-iv-td">
-                        {combinedIV ? <span className="oc-iv-value">{(combinedIV * 100).toFixed(2)}%</span> : <span className="oc-empty">—</span>}
-                      </td>
-                      {/* Strike */}
-                      <td className="oc-strike-td">{strike}</td>
-                      {/* Put OI — bar fills left-to-right */}
-                      <td className="oc-put-oi-td">
-                        <div className="oc-oi-value oc-oi-put">{fmtOI(putOI)}</div>
-                        <div className="oc-oi-bar-wrap"><div className="oc-oi-bar oc-oi-bar-put" style={{ width: putOIPct }} /></div>
-                      </td>
-                      {/* Put LTP — ltp delta left, [B][S] right */}
-                      <td className="oc-put-td">
-                        <div className="oc-cell-inner">
-                          {put ? (<><span className="oc-ltp">{put.close.toFixed(2)}</span><span className="oc-delta">({put.delta != null ? put.delta.toFixed(2) : "—"})</span></>) : <span className="oc-empty">—</span>}
-                          <div className={`oc-actions action_button${buyPutActive || sellPutActive ? " has-active" : ""}`}>
-                            <span className="oc-btn-wrap">
-                              <button type="button" className={`buy_button${buyPutActive ? " oc-btn-active" : ""}`} onClick={() => toggleOcPos(strike, "Put", "Buy", put?.close || 0)}>B</button>
-                              {buyPutCount > 0 && <span className="oc-pos-count buy">{buyPutCount}</span>}
-                            </span>
-                            <span className="oc-btn-wrap">
-                              <button type="button" className={`sell_button${sellPutActive ? " oc-btn-active" : ""}`} onClick={() => toggleOcPos(strike, "Put", "Sell", put?.close || 0)}>S</button>
-                              {sellPutCount > 0 && <span className="oc-pos-count sell">{sellPutCount}</span>}
-                            </span>
+                        </th>
+                        <th className="lotsize_head">Lots</th>
+                        <th>Qty</th>
+                        <th>Date &nbsp;↕</th>
+                        <th>Strike &nbsp;◇</th>
+                        <th>Expiry</th>
+                        <th>Entry</th>
+                        <th>LTP/Exit</th>
+                        <th>Delta</th>
+                        <th>P&amp;L</th>
+                        <th>Lots Exit &nbsp;◇</th>
+                      </tr>
+                    </thead>
+                    <tbody>
+                      {optionLegs.length === 0 ? (
+                        <tr><td colSpan={11} className="pos-empty">No positions — click B or S on the option chain to add.</td></tr>
+                      ) : (
+                        optionLegs.map((leg, index) => {
+                          const ltp = getLegLTP(leg);
+                          const delta = getLegDelta(leg);
+                          const pnl = getLegPnl(leg);
+                          const pnlPct = leg.premium > 0 ? Math.abs(pnl / (leg.premium * leg.quantity)) * 100 : 0;
+                          const pnlCls = pnl >= 0 ? "simulator_green_text" : "simulator_red_text";
+                          const lots = leg.isQueued ? "-" : String(Math.max(1, Math.round(leg.quantity / LOT_SIZE)));
+                          const typeCode = leg.optionType === "Call" ? "CE" : "PE";
+                          const typeCls = leg.optionType === "Call" ? "call-btn-pt" : "put-btn-pt";
+                          const isIncluded = leg.includeInPnl !== false;
+                          const rowClass = leg.isQueued ? " queued__position" : (leg.exited ? (pnl >= 0 ? " exited__TP" : " exited__SL") : "");
+                          const rowOpacity = leg.exited ? 0.8 : 1;
+                          return (
+                            <tr key={`${index}-${leg.expiry}-${leg.strike}-${leg.type}`}
+                              className={`parent_position${rowClass}`}
+                              style={{ opacity: rowOpacity }}
+                            >
+                              <td style={{ padding: 0, paddingLeft: 4 }}>
+                                <div className="action_button_group">
+                                  <label className="checkbox-container-pt" onClick={() => { if (!leg.isQueued) toggleInclude(index); }}>
+                                    <span className={`checkbox-custom-pt${isIncluded ? " checked" : ""}`} style={leg.isQueued ? { opacity: 0.5 } : undefined} />
+                                  </label>
+                                  <div className={leg.type === "Buy" ? "pt-buy-btn" : "pt-sell-btn"}>
+                                    {leg.type === "Buy" ? "B" : "S"}
+                                  </div>
+                                </div>
+                              </td>
+                              <td>
+                                {leg.isQueued ? (
+                                  <div className="position__queue__dash">-</div>
+                                ) : (
+                                  <div className="simulator_position_input position__strike">
+                                    <button className="sign_btn" onClick={() => updateLots(index, Number(lots) - 1)}>−</button>
+                                    <input type="number" className="sim-input lot-input" value={lots} min={1}
+                                      onChange={(e) => updateLots(index, parseInt(e.target.value) || 1)} />
+                                    <button className="sign_btn" onClick={() => updateLots(index, Number(lots) + 1)}>+</button>
+                                  </div>
+                                )}
+                              </td>
+                              <td>{leg.isQueued ? "-" : leg.quantity}</td>
+                              <td>
+                                <div style={{ display: "flex", flexDirection: "column" }}>
+                                  <span>{leg.isQueued && <span className="queue-dot" />}{fmtEntryDate(leg.isQueued ? (leg.queuedAt || leg.entryDate) : leg.entryDate)}</span>
+                                  {leg.exitDate && <span className="expiry_indicator">({fmtEntryDate(leg.exitDate)})</span>}
+                                </div>
+                              </td>
+                              <td>
+                                <div className="position__strike">
+                                  <span>{leg.strike}</span>
+                                  <span className={typeCls}>{typeCode}</span>
+                                </div>
+                              </td>
+                              <td><div className="position__expiry">{fmtExpiry(leg.expiry)}</div></td>
+                              <td>
+                                {leg.isQueued ? (
+                                  <div className="position__queue__dash">-</div>
+                                ) : (
+                                  <input type="number" step="any" className="sim-input"
+                                    defaultValue={leg.premium.toFixed(2)}
+                                    onBlur={(e) => updateEntryPrice(index, parseFloat(e.target.value) || leg.premium)} />
+                                )}
+                              </td>
+                              <td>
+                                {leg.isQueued ? (
+                                  <div className="position__queue__dash">-</div>
+                                ) : (
+                                  <input type="number" step="any" className="sim-input" value={ltp.toFixed(2)} readOnly />
+                                )}
+                              </td>
+                              <td style={{ textAlign: "center" }}>{leg.isQueued ? "-" : (delta != null ? delta.toFixed(2) : "—")}</td>
+                              <td className={pnlCls}>
+                                {leg.isQueued ? (
+                                  <div style={{ whiteSpace: "nowrap" }}>-</div>
+                                ) : (
+                                  <div style={{ whiteSpace: "nowrap" }}>
+                                    <span>{pnl < 0 ? "-" : ""}₹{Math.abs(pnl).toLocaleString("en-IN", { minimumFractionDigits: 2, maximumFractionDigits: 2 })}</span>
+                                    <span className={`expiry_indicator ${pnlCls}`}> ({pnlPct.toFixed(0)}%)</span>
+                                  </div>
+                                )}
+                              </td>
+                              <td>
+                                {leg.isQueued ? (
+                                  <div className="position__queue__dash">-</div>
+                                ) : (
+                                  <div className="simulator_position_button">
+                                    <select className="lot_select_space">
+                                      {Array.from({ length: 20 }, (_, i) => i + 1).map((n) => (
+                                        <option key={n} value={n}>{n}</option>
+                                      ))}
+                                    </select>
+                                    {leg.exited
+                                      ? <button type="button" className="pos-exit-btn" title="Reopen" onClick={() => reopenLeg(index)}>↺</button>
+                                      : <button type="button" className="pos-exit-btn" title="Exit" onClick={() => exitLeg(index)}>⊗</button>
+                                    }
+                                    <button type="button" className="pos-del-btn" title="Delete" onClick={() => removeLeg(index)}>🗑</button>
+                                  </div>
+                                )}
+                              </td>
+                            </tr>
+                          );
+                        })
+                      )}
+                    </tbody>
+                    <tfoot>
+                      <tr className="table_footer">
+                        <th colSpan={8} style={{ textAlign: "left" }}>
+                          <div style={{ display: "flex", alignItems: "center", gap: 6, flexWrap: "wrap" }}>
+                            <span style={{ marginLeft: 4 }}>Multiplier:</span>
+                            <div className="simulator_group_input">
+                              <button type="button" className="sign_button" disabled={multiplier <= 1} onClick={() => setMultiplier((m) => Math.max(1, m - 1))}>−</button>
+                              <input className="mult_input" type="number" value={multiplier} min={1}
+                                onChange={(e) => setMultiplier(Math.max(1, parseInt(e.target.value) || 1))} />
+                              <button type="button" className="sign_button" onClick={() => setMultiplier((m) => m + 1)}>+</button>
+                            </div>
+                            <span style={{ color: "#6b7280", marginLeft: 4 }}>Lot Size: {LOT_SIZE}</span>
+                            <button type="button" className="btn-outline-xs" style={{ marginLeft: 4 }}>Add Alert</button>
+                            <button type="button" className="btn-outline-xs">Save</button>
+                            <button type="button" className="btn-outline-xs">Share</button>
                           </div>
-                        </div>
-                      </td>
-                    </tr>
-                  );
-                })}
-              </tbody>
-            </table>
-          </div>
+                        </th>
+                        <th style={{ textAlign: "center", color: totalDelta >= 0 ? "#03B760" : "#EF6161" }}>
+                          {totalDelta.toFixed(2)}
+                        </th>
+                        <th className={totalPositionPnl >= 0 ? "simulator_green_text" : "simulator_red_text"}>
+                          {totalPositionPnl < 0 ? "-" : ""}₹{Math.abs(totalPositionPnl).toLocaleString("en-IN", { minimumFractionDigits: 2, maximumFractionDigits: 2 })}
+                        </th>
+                        <th>
+                          <div className="simulator_position_button">
+                            <a className="pos-exit-all" style={{ cursor: "pointer" }} onClick={() => setOptionLegs((prev) => prev.map((leg) => { const ltp2 = getLTP(leg.strike, leg.expiry, leg.optionType); const d2 = getLegDelta(leg); return { ...leg, exited: true, exitPrice: ltp2 ?? leg.premium, exitDelta: d2 }; }))}>Exit</a>
+                            <a className="pos-clear-all" style={{ cursor: "pointer" }} onClick={() => setOptionLegs([])}>Clear</a>
+                          </div>
+                        </th>
+                      </tr>
+                    </tfoot>
+                  </table>
+                </div>
+              )}
+
+              {posActiveTab !== "Positions" && (
+                <div style={{ padding: "24px", textAlign: "center", color: "#94a3b8", fontSize: 13 }}>
+                  {posActiveTab === "Greeks" && "Greeks view coming soon…"}
+                  {posActiveTab === "TargetPnL" && "Target P&L chart coming soon…"}
+                  {posActiveTab === "Notes" && "Notes coming soon…"}
+                </div>
+              )}
+            </div>
+          )}
         </div>
 
-          <div className="chart-section">
+        <div className="chart-section">
           <div className="simulator-card">
             <div className="table-tabs-container">
               <ul className="table-tabs">
@@ -2069,627 +2393,629 @@ export default function SLSimulatorPage() {
                 <div className="breakevan-box">
                   {breakevenPoints.length
                     ? breakevenPoints.map((be) => {
-                        const dist = currentSpotPrice > 0 ? Math.abs((be - currentSpotPrice) / currentSpotPrice * 100).toFixed(1) : "0.0";
-                        return `${be} (${dist}%)`;
-                      }).join(" - ")
+                      const dist = currentSpotPrice > 0 ? Math.abs((be - currentSpotPrice) / currentSpotPrice * 100).toFixed(1) : "0.0";
+                      return `${be} (${dist}%)`;
+                    }).join(" - ")
                     : "—"}
                 </div>
               </div>
             </div>
 
-          <div className="chart-wrapper" ref={chartWrapperRef}>
-            <canvas ref={canvasRef} id="payoffChart" />
+            <div className="chart-wrapper" ref={chartWrapperRef}>
+              <canvas ref={canvasRef} id="payoffChart" />
 
-            {tooltip.visible && (
-              <div className="payoff-tooltip" style={{ display: "block", left: tooltip.left, top: tooltip.top }}>
-                <div className="payoff-tooltip-spot-label">When price is at</div>
-                <div className="payoff-tooltip-spot-price">
-                  <span className="payoff-tooltip-spot-main">₹{tooltip.price.toLocaleString("en-IN", { maximumFractionDigits: 2, minimumFractionDigits: 2 })}</span>
-                  {(() => {
-                    const diff = tooltip.price - currentSpotPrice;
-                    const diffPct = currentSpotPrice > 0 ? (diff / currentSpotPrice) * 100 : 0;
-                    const diffClass = diff >= 0 ? "up" : "down";
-                    const diffSign = diff >= 0 ? "+" : "";
-                    return (
-                      <span className={`payoff-tooltip-spot-diff ${diffClass}`}>
-                        {diffSign}{diffPct.toFixed(2)}% ({diffSign}{Math.round(diff)})
-                      </span>
-                    );
-                  })()}
-                </div>
-                <div className="payoff-tooltip-title">Expected P&amp;L On {formatDateLabel(currentMarketTime.toISOString())}</div>
-                <div className="payoff-tooltip-row">
-                  <span className="payoff-tooltip-label">Price</span>
-                  <span className="payoff-tooltip-value">₹{tooltip.price.toFixed(2)}</span>
-                </div>
-                {tooltip.pnl != null && (
+              {tooltip.visible && (
+                <div className="payoff-tooltip" style={{ display: "block", left: tooltip.left, top: tooltip.top }}>
+                  <div className="payoff-tooltip-spot-label">When price is at</div>
+                  <div className="payoff-tooltip-spot-price">
+                    <span className="payoff-tooltip-spot-main">₹{tooltip.price.toLocaleString("en-IN", { maximumFractionDigits: 2, minimumFractionDigits: 2 })}</span>
+                    {(() => {
+                      const diff = tooltip.price - currentSpotPrice;
+                      const diffPct = currentSpotPrice > 0 ? (diff / currentSpotPrice) * 100 : 0;
+                      const diffClass = diff >= 0 ? "up" : "down";
+                      const diffSign = diff >= 0 ? "+" : "";
+                      return (
+                        <span className={`payoff-tooltip-spot-diff ${diffClass}`}>
+                          {diffSign}{diffPct.toFixed(2)}% ({diffSign}{Math.round(diff)})
+                        </span>
+                      );
+                    })()}
+                  </div>
+                  <div className="payoff-tooltip-title">Expected P&amp;L On {formatDateLabel(currentMarketTime.toISOString())}</div>
                   <div className="payoff-tooltip-row">
-                    <span className="payoff-tooltip-label">P&amp;L</span>
-                    <span className="payoff-tooltip-value" style={{ color: tooltip.pnl >= 0 ? "#22c55e" : "#ef4444" }}>
-                      ₹{tooltip.pnl.toLocaleString("en-IN", { maximumFractionDigits: 2 })}
-                    </span>
+                    <span className="payoff-tooltip-label">Price</span>
+                    <span className="payoff-tooltip-value">₹{tooltip.price.toFixed(2)}</span>
                   </div>
-                )}
-                {tooltip.expiryPnl != null && (
+                  {tooltip.pnl != null && (
+                    <div className="payoff-tooltip-row">
+                      <span className="payoff-tooltip-label">P&amp;L</span>
+                      <span className="payoff-tooltip-value" style={{ color: tooltip.pnl >= 0 ? "#22c55e" : "#ef4444" }}>
+                        ₹{tooltip.pnl.toLocaleString("en-IN", { maximumFractionDigits: 2 })}
+                      </span>
+                    </div>
+                  )}
+                  {tooltip.expiryPnl != null && (
+                    <div className="payoff-tooltip-row payoff-tooltip-divider">
+                      <span className="payoff-tooltip-label">At Expiry</span>
+                      <span className="payoff-tooltip-value" style={{ color: tooltip.expiryPnl >= 0 ? "#22c55e" : "#ef4444" }}>
+                        ₹{tooltip.expiryPnl.toLocaleString("en-IN", { maximumFractionDigits: 2 })}
+                      </span>
+                    </div>
+                  )}
                   <div className="payoff-tooltip-row payoff-tooltip-divider">
-                    <span className="payoff-tooltip-label">At Expiry</span>
-                    <span className="payoff-tooltip-value" style={{ color: tooltip.expiryPnl >= 0 ? "#22c55e" : "#ef4444" }}>
-                      ₹{tooltip.expiryPnl.toLocaleString("en-IN", { maximumFractionDigits: 2 })}
+                    <span className="payoff-tooltip-label">Put OI</span>
+                    <span className="payoff-tooltip-value" style={{ color: "#f87171" }}>
+                      {tooltip.putOi != null ? Math.round(tooltip.putOi).toLocaleString() : "—"}
                     </span>
                   </div>
-                )}
-                <div className="payoff-tooltip-row payoff-tooltip-divider">
-                  <span className="payoff-tooltip-label">Put OI</span>
-                  <span className="payoff-tooltip-value" style={{ color: "#f87171" }}>
-                    {tooltip.putOi != null ? Math.round(tooltip.putOi).toLocaleString() : "—"}
-                  </span>
-                </div>
-                <div className="payoff-tooltip-row">
-                  <span className="payoff-tooltip-label">Call OI</span>
-                  <span className="payoff-tooltip-value" style={{ color: "#60a5fa" }}>
-                    {tooltip.callOi != null ? Math.round(tooltip.callOi).toLocaleString() : "—"}
-                  </span>
-                </div>
-              </div>
-            )}
-
-            {tooltip.visible && chartArea && priceToX(tooltip.price) != null && (
-              <div
-                className="tooltip-hover-line"
-                style={{
-                  display: "block",
-                  height: chartArea.bottom - chartArea.top,
-                  left: priceToX(tooltip.price) || 0,
-                  top: chartArea.top,
-                }}
-              />
-            )}
-
-            {chartArea && sdGuideLevels.map((guide) => {
-              const guideX = priceToX(guide.price);
-              if (guideX == null) return null;
-              return (
-                <div key={guide.label}>
-                  <div
-                    className="sd-guide-line"
-                    style={{
-                      display: "block",
-                      height: chartArea.bottom - chartArea.top,
-                      left: guideX,
-                      top: chartArea.top,
-                    }}
-                  />
-                  <div className="sd-guide-label" style={{ left: guideX }}>
-                    {guide.label}
+                  <div className="payoff-tooltip-row">
+                    <span className="payoff-tooltip-label">Call OI</span>
+                    <span className="payoff-tooltip-value" style={{ color: "#60a5fa" }}>
+                      {tooltip.callOi != null ? Math.round(tooltip.callOi).toLocaleString() : "—"}
+                    </span>
                   </div>
                 </div>
-              );
-            })}
+              )}
 
-            {chartArea && frozenAdjLevels?.upper != null && priceToX(frozenAdjLevels.upper) != null && (
-              <div
-                className="adj-line adj-line-upper"
-                style={{
-                  display: "block",
-                  height: chartArea.bottom - chartArea.top,
-                  left: priceToX(frozenAdjLevels.upper) || 0,
-                  top: chartArea.top,
-                }}
-              >
-                <div className="adj-line-label">{renderPriceLabel(frozenAdjLevels.upper, "adj")}</div>
-              </div>
-            )}
-
-            {chartArea && frozenAdjLevels?.lower != null && priceToX(frozenAdjLevels.lower) != null && (
-              <div
-                className="adj-line adj-line-lower"
-                style={{
-                  display: "block",
-                  height: chartArea.bottom - chartArea.top,
-                  left: priceToX(frozenAdjLevels.lower) || 0,
-                  top: chartArea.top,
-                }}
-              >
-                <div className="adj-line-label">{renderPriceLabel(frozenAdjLevels.lower, "adj")}</div>
-              </div>
-            )}
-
-            {spotVisible && (
-              <>
-                <div className={`spot-line${floatingLoss ? " loss" : " profit"}`} style={{ display: "block", height: chartArea.bottom - chartArea.top, left: spotX || 0, top: chartArea.top }} />
-                <div className="spot-price-label" style={{ display: "block", left: spotX || 0, top: chartArea.top + 4 }}>
-                  ₹{currentSpotPrice.toFixed(2)}
-                </div>
-              </>
-            )}
-
-            {zoomSelection.visible && (
-              <div className="zoom-selection" style={{ display: "block", ...zoomSelection }} />
-            )}
-
-            {userCustomZoom && (
-              <button className="zoom-reset-btn" onClick={resetZoom}>
-                Reset Zoom
-              </button>
-            )}
-
-            <div className="zoom-controls">
-              <button
-                type="button"
-                className="zoom-ctrl-btn"
-                title="Zoom In"
-                onClick={() => {
-                  const center = (zoomStartPrice + zoomEndPrice) / 2;
-                  const half = (zoomEndPrice - zoomStartPrice) / 2;
-                  applyZoomRange(center - half * 0.7, center + half * 0.7);
-                }}
-              >
-                +
-              </button>
-              <button
-                type="button"
-                className="zoom-ctrl-btn"
-                title="Zoom Out"
-                onClick={() => {
-                  const center = (zoomStartPrice + zoomEndPrice) / 2;
-                  const half = (zoomEndPrice - zoomStartPrice) / 2;
-                  applyZoomRange(center - half * 1.4, center + half * 1.4);
-                }}
-              >
-                −
-              </button>
-            </div>
-
-            <button
-              className={`sl-config-btn${slMode ? " active" : ""}`}
-              onClick={() => {
-                if (slMode) {
-                  setSlMode(false);
-                  setSlHoverPrice(null);
-                  setSlMarkerPrice(null);
-                } else {
-                  const nextCondition: StoplossCondition = !slSavedUpper && slSavedLower ? ">=" : "<=";
-                  const existing = nextCondition === ">=" ? slSavedUpper : slSavedLower;
-                  setSlCondition(nextCondition);
-                  setSlMarkerPrice(existing?.price ?? null);
-                  setSlHoverPrice(null);
-                  setSlMode(true);
-                }
-              }}
-            >
-              {slMode ? "✕ Cancel" : "⚡ Stoploss"}
-            </button>
-
-            {slMode && chartArea && slHoverPrice != null && priceToX(slHoverPrice) != null && (
-              <div className="sl-hover-line" style={{ display: "block", height: chartArea.bottom - chartArea.top, left: priceToX(slHoverPrice) || 0, top: chartArea.top }} />
-            )}
-
-            {slMode && chartArea && editingSlPrice != null && editingSlX != null && (
-              <>
-                {slMarkerPrice != null && (
-                  <div
-                    className="sl-marker-line"
-                    style={{
-                      display: "block",
-                      height: chartArea.bottom - chartArea.top,
-                      left: priceToX(slMarkerPrice) ?? 0,
-                      top: chartArea.top,
-                    }}
-                  />
-                )}
+              {tooltip.visible && chartArea && priceToX(tooltip.price) != null && (
                 <div
-                  className="sl-shade-region"
+                  className="tooltip-hover-line"
                   style={{
                     display: "block",
-                    left: slCondition === "<=" ? chartArea.left : editingSlX,
-                    top: chartArea.top,
-                    width:
-                      slCondition === "<="
-                        ? editingSlX - chartArea.left
-                        : chartArea.right - editingSlX,
                     height: chartArea.bottom - chartArea.top,
-                    background: slCondition === ">=" ? "rgba(22,163,74,.10)" : "rgba(220,38,38,.10)",
+                    left: priceToX(tooltip.price) || 0,
+                    top: chartArea.top,
                   }}
                 />
-              </>
-            )}
+              )}
 
-            {chartArea && slSavedUpper && priceToX(slSavedUpper.price) != null && (!slMode || slCondition !== ">=") && (
-              <>
-                <div className="sl-marker-line sl-marker-upper" style={{ display: "block", height: chartArea.bottom - chartArea.top, left: priceToX(slSavedUpper.price) || 0, top: chartArea.top }}>
-                  <div className="sl-marker-label sl-label-upper">{renderPriceLabel(slSavedUpper.price, "sl")}</div>
-                </div>
-                <div
-                  className="sl-shade-region"
-                  style={{
-                    background: "rgba(22,163,74,.10)",
-                    display: "block",
-                    left: priceToX(slSavedUpper.price) || 0,
-                    top: chartArea.top,
-                    width: chartArea.right - (priceToX(slSavedUpper.price) || chartArea.right),
-                    height: chartArea.bottom - chartArea.top,
-                  }}
-                />
-              </>
-            )}
-
-            {chartArea && slSavedLower && priceToX(slSavedLower.price) != null && (!slMode || slCondition !== "<=") && (
-              <>
-                <div className="sl-marker-line sl-marker-lower" style={{ display: "block", height: chartArea.bottom - chartArea.top, left: priceToX(slSavedLower.price) || 0, top: chartArea.top }}>
-                  <div className="sl-marker-label sl-label-lower">{renderPriceLabel(slSavedLower.price, "sl")}</div>
-                </div>
-                <div
-                  className="sl-shade-region"
-                  style={{
-                    background: "rgba(220,38,38,.10)",
-                    display: "block",
-                    left: chartArea.left,
-                    top: chartArea.top,
-                    width: (priceToX(slSavedLower.price) || chartArea.left) - chartArea.left,
-                    height: chartArea.bottom - chartArea.top,
-                  }}
-                />
-              </>
-            )}
-
-            {slMode && (
-              <div
-                className="sl-config-panel"
-                style={{
-                  display: "block",
-                  left: panelPosition.left ?? undefined,
-                  right: panelPosition.left == null ? 20 : "auto",
-                  top: panelPosition.top ?? 80,
-                }}
-              >
-                <div
-                  className="sl-panel-header"
-                  onMouseDown={(event) => {
-                    const rect = (event.currentTarget.parentElement as HTMLDivElement).getBoundingClientRect();
-                    panelDragRef.current = {
-                      active: true,
-                      offsetX: event.clientX - rect.left,
-                      offsetY: event.clientY - rect.top,
-                    };
-                    const onMove = (moveEvent: MouseEvent) => {
-                      if (!panelDragRef.current.active) return;
-                      setPanelPosition({
-                        left: Math.max(0, moveEvent.clientX - panelDragRef.current.offsetX),
-                        top: Math.max(0, moveEvent.clientY - panelDragRef.current.offsetY),
-                      });
-                    };
-                    const onUp = () => {
-                      panelDragRef.current.active = false;
-                      document.removeEventListener("mousemove", onMove);
-                      document.removeEventListener("mouseup", onUp);
-                    };
-                    document.addEventListener("mousemove", onMove);
-                    document.addEventListener("mouseup", onUp);
-                  }}
-                >
-                  <span className="sl-panel-title">⚡ Configure Stoploss</span>
-                  <button className="sl-panel-close" onClick={() => setSlMode(false)}>
-                    ×
-                  </button>
-                </div>
-                <div className="sl-panel-body">
-                  <div className="sl-instruction">
-                    {slMarkerPrice == null ? "Click on the chart to place stoploss level" : "Price set. Adjust or save."}
-                  </div>
-                  <div className="sl-panel-row">
-                    <label>Trigger when NIFTY goes</label>
-                    <div className="sl-condition-row">
-                      <select value={slCondition} onChange={(event) => setSlCondition(event.target.value as StoplossCondition)}>
-                        <option value="<=">Below ≤</option>
-                        <option value=">=">Above ≥</option>
-                      </select>
-                      <input
-                        type="number"
-                        placeholder="Price"
-                        step={50}
-                        value={slMarkerPrice ?? ""}
-                        onChange={(event) => setSlMarkerPrice(event.target.value ? Number(event.target.value) : null)}
-                      />
-                    </div>
-                  </div>
-                  <div className="sl-panel-row">
-                    <label>Current Spot</label>
-                    <span className="sl-spot-value">₹{currentSpotPrice.toLocaleString("en-IN", { maximumFractionDigits: 2 })}</span>
-                  </div>
-                  <div className="sl-panel-row">
-                    <div className="sl-diff-row">
-                      <span>
-                        {activeSlPrice == null
-                          ? "— pts"
-                          : `${activeSlPrice - currentSpotPrice >= 0 ? "+" : ""}${Math.round(activeSlPrice - currentSpotPrice)} pts`}
-                      </span>
-                      <span>
-                        {activeSlPrice == null
-                          ? "—%"
-                          : `${((activeSlPrice - currentSpotPrice) / currentSpotPrice) * 100 >= 0 ? "+" : ""}${(((activeSlPrice - currentSpotPrice) / currentSpotPrice) * 100).toFixed(2)}%`}
-                      </span>
-                    </div>
-                  </div>
-                  <div className={`sl-pnl-box${activeSlProfit ? " profit" : ""}`}>
-                    <div className="sl-pnl-label">Approx P&amp;L at exit</div>
-                    <div className={`sl-pnl-value${activeSlProfit ? " profit" : ""}`}>{activeSlPnl == null ? "—" : fmtCurrency(activeSlPnl)}</div>
-                  </div>
-                  <div className="sl-panel-actions">
-                    <button className="sl-cancel-btn" onClick={() => setSlMode(false)}>
-                      Cancel
-                    </button>
-                    <button
-                      className="sl-save-btn"
-                      disabled={slMarkerPrice == null}
-                      onClick={() => {
-                        if (slMarkerPrice == null) return;
-                        const nextValue = { condition: slCondition, price: slMarkerPrice };
-                        if (slCondition === ">=") setSlSavedUpper(nextValue);
-                        else setSlSavedLower(nextValue);
-                        setSlMode(false);
+              {chartArea && sdGuideLevels.map((guide) => {
+                const guideX = priceToX(guide.price);
+                if (guideX == null) return null;
+                return (
+                  <div key={guide.label}>
+                    <div
+                      className="sd-guide-line"
+                      style={{
+                        display: "block",
+                        height: chartArea.bottom - chartArea.top,
+                        left: guideX,
+                        top: chartArea.top,
                       }}
-                    >
-                      Save
+                    />
+                    <div className="sd-guide-label" style={{ left: guideX }}>
+                      {guide.label}
+                    </div>
+                  </div>
+                );
+              })}
+
+              {chartArea && frozenAdjLevels?.upper != null && priceToX(frozenAdjLevels.upper) != null && (
+                <div
+                  className="adj-line adj-line-upper"
+                  style={{
+                    display: "block",
+                    height: chartArea.bottom - chartArea.top,
+                    left: priceToX(frozenAdjLevels.upper) || 0,
+                    top: chartArea.top,
+                  }}
+                >
+                  <div className="adj-line-label">{renderPriceLabel(frozenAdjLevels.upper, "adj")}</div>
+                </div>
+              )}
+
+              {chartArea && frozenAdjLevels?.lower != null && priceToX(frozenAdjLevels.lower) != null && (
+                <div
+                  className="adj-line adj-line-lower"
+                  style={{
+                    display: "block",
+                    height: chartArea.bottom - chartArea.top,
+                    left: priceToX(frozenAdjLevels.lower) || 0,
+                    top: chartArea.top,
+                  }}
+                >
+                  <div className="adj-line-label">{renderPriceLabel(frozenAdjLevels.lower, "adj")}</div>
+                </div>
+              )}
+
+              {spotVisible && (
+                <>
+                  <div className={`spot-line${floatingLoss ? " loss" : " profit"}`} style={{ display: "block", height: chartArea.bottom - chartArea.top, left: spotX || 0, top: chartArea.top }} />
+                  <div className="spot-price-label" style={{ display: "block", left: spotX || 0, top: chartArea.top + 4 }}>
+                    ₹{currentSpotPrice.toFixed(2)}
+                  </div>
+                </>
+              )}
+
+              {zoomSelection.visible && (
+                <div className="zoom-selection" style={{ display: "block", ...zoomSelection }} />
+              )}
+
+              {userCustomZoom && (
+                <button className="zoom-reset-btn" onClick={resetZoom}>
+                  Reset Zoom
+                </button>
+              )}
+
+              <div className="zoom-controls">
+                <button
+                  type="button"
+                  className="zoom-ctrl-btn"
+                  title="Zoom In"
+                  onClick={() => {
+                    const center = (zoomStartPrice + zoomEndPrice) / 2;
+                    const half = (zoomEndPrice - zoomStartPrice) / 2;
+                    applyZoomRange(center - half * 0.7, center + half * 0.7);
+                  }}
+                >
+                  +
+                </button>
+                <button
+                  type="button"
+                  className="zoom-ctrl-btn"
+                  title="Zoom Out"
+                  onClick={() => {
+                    const center = (zoomStartPrice + zoomEndPrice) / 2;
+                    const half = (zoomEndPrice - zoomStartPrice) / 2;
+                    applyZoomRange(center - half * 1.4, center + half * 1.4);
+                  }}
+                >
+                  −
+                </button>
+              </div>
+
+              <button
+                className={`sl-config-btn${slMode ? " active" : ""}`}
+                onClick={() => {
+                  if (slMode) {
+                    setSlMode(false);
+                    setSlHoverPrice(null);
+                    setSlMarkerPrice(null);
+                  } else {
+                    const nextCondition: StoplossCondition = !slSavedUpper && slSavedLower ? ">=" : "<=";
+                    const existing = nextCondition === ">=" ? slSavedUpper : slSavedLower;
+                    setSlCondition(nextCondition);
+                    setSlMarkerPrice(existing?.price ?? null);
+                    setSlHoverPrice(null);
+                    setSlMode(true);
+                  }
+                }}
+              >
+                {slMode ? "✕ Cancel" : "⚡ Stoploss"}
+              </button>
+
+              {slMode && chartArea && slHoverPrice != null && priceToX(slHoverPrice) != null && (
+                <div className="sl-hover-line" style={{ display: "block", height: chartArea.bottom - chartArea.top, left: priceToX(slHoverPrice) || 0, top: chartArea.top }} />
+              )}
+
+              {slMode && chartArea && editingSlPrice != null && editingSlX != null && (
+                <>
+                  {slMarkerPrice != null && (
+                    <div
+                      className="sl-marker-line"
+                      style={{
+                        display: "block",
+                        height: chartArea.bottom - chartArea.top,
+                        left: priceToX(slMarkerPrice) ?? 0,
+                        top: chartArea.top,
+                      }}
+                    />
+                  )}
+                  <div
+                    className="sl-shade-region"
+                    style={{
+                      display: "block",
+                      left: slCondition === "<=" ? chartArea.left : editingSlX,
+                      top: chartArea.top,
+                      width:
+                        slCondition === "<="
+                          ? editingSlX - chartArea.left
+                          : chartArea.right - editingSlX,
+                      height: chartArea.bottom - chartArea.top,
+                      background: slCondition === ">=" ? "rgba(22,163,74,.10)" : "rgba(220,38,38,.10)",
+                    }}
+                  />
+                </>
+              )}
+
+              {chartArea && slSavedUpper && priceToX(slSavedUpper.price) != null && (!slMode || slCondition !== ">=") && (
+                <>
+                  <div className="sl-marker-line sl-marker-upper" style={{ display: "block", height: chartArea.bottom - chartArea.top, left: priceToX(slSavedUpper.price) || 0, top: chartArea.top }}>
+                    <div className="sl-marker-label sl-label-upper">{renderPriceLabel(slSavedUpper.price, "sl")}</div>
+                  </div>
+                  <div
+                    className="sl-shade-region"
+                    style={{
+                      background: "rgba(22,163,74,.10)",
+                      display: "block",
+                      left: priceToX(slSavedUpper.price) || 0,
+                      top: chartArea.top,
+                      width: chartArea.right - (priceToX(slSavedUpper.price) || chartArea.right),
+                      height: chartArea.bottom - chartArea.top,
+                    }}
+                  />
+                </>
+              )}
+
+              {chartArea && slSavedLower && priceToX(slSavedLower.price) != null && (!slMode || slCondition !== "<=") && (
+                <>
+                  <div className="sl-marker-line sl-marker-lower" style={{ display: "block", height: chartArea.bottom - chartArea.top, left: priceToX(slSavedLower.price) || 0, top: chartArea.top }}>
+                    <div className="sl-marker-label sl-label-lower">{renderPriceLabel(slSavedLower.price, "sl")}</div>
+                  </div>
+                  <div
+                    className="sl-shade-region"
+                    style={{
+                      background: "rgba(220,38,38,.10)",
+                      display: "block",
+                      left: chartArea.left,
+                      top: chartArea.top,
+                      width: (priceToX(slSavedLower.price) || chartArea.left) - chartArea.left,
+                      height: chartArea.bottom - chartArea.top,
+                    }}
+                  />
+                </>
+              )}
+
+              {slMode && (
+                <div
+                  className="sl-config-panel"
+                  style={{
+                    display: "block",
+                    left: panelPosition.left ?? undefined,
+                    right: panelPosition.left == null ? 20 : "auto",
+                    top: panelPosition.top ?? 80,
+                  }}
+                >
+                  <div
+                    className="sl-panel-header"
+                    onMouseDown={(event) => {
+                      const rect = (event.currentTarget.parentElement as HTMLDivElement).getBoundingClientRect();
+                      panelDragRef.current = {
+                        active: true,
+                        offsetX: event.clientX - rect.left,
+                        offsetY: event.clientY - rect.top,
+                      };
+                      const onMove = (moveEvent: MouseEvent) => {
+                        if (!panelDragRef.current.active) return;
+                        setPanelPosition({
+                          left: Math.max(0, moveEvent.clientX - panelDragRef.current.offsetX),
+                          top: Math.max(0, moveEvent.clientY - panelDragRef.current.offsetY),
+                        });
+                      };
+                      const onUp = () => {
+                        panelDragRef.current.active = false;
+                        document.removeEventListener("mousemove", onMove);
+                        document.removeEventListener("mouseup", onUp);
+                      };
+                      document.addEventListener("mousemove", onMove);
+                      document.addEventListener("mouseup", onUp);
+                    }}
+                  >
+                    <span className="sl-panel-title">⚡ Configure Stoploss</span>
+                    <button className="sl-panel-close" onClick={() => setSlMode(false)}>
+                      ×
                     </button>
                   </div>
+                  <div className="sl-panel-body">
+                    <div className="sl-instruction">
+                      {slMarkerPrice == null ? "Click on the chart to place stoploss level" : "Price set. Adjust or save."}
+                    </div>
+                    <div className="sl-panel-row">
+                      <label>Trigger when NIFTY goes</label>
+                      <div className="sl-condition-row">
+                        <select value={slCondition} onChange={(event) => setSlCondition(event.target.value as StoplossCondition)}>
+                          <option value="<=">Below ≤</option>
+                          <option value=">=">Above ≥</option>
+                        </select>
+                        <input
+                          type="number"
+                          placeholder="Price"
+                          step={50}
+                          value={slMarkerPrice ?? ""}
+                          onChange={(event) => setSlMarkerPrice(event.target.value ? Number(event.target.value) : null)}
+                        />
+                      </div>
+                    </div>
+                    <div className="sl-panel-row">
+                      <label>Current Spot</label>
+                      <span className="sl-spot-value">₹{currentSpotPrice.toLocaleString("en-IN", { maximumFractionDigits: 2 })}</span>
+                    </div>
+                    <div className="sl-panel-row">
+                      <div className="sl-diff-row">
+                        <span>
+                          {activeSlPrice == null
+                            ? "— pts"
+                            : `${activeSlPrice - currentSpotPrice >= 0 ? "+" : ""}${Math.round(activeSlPrice - currentSpotPrice)} pts`}
+                        </span>
+                        <span>
+                          {activeSlPrice == null
+                            ? "—%"
+                            : `${((activeSlPrice - currentSpotPrice) / currentSpotPrice) * 100 >= 0 ? "+" : ""}${(((activeSlPrice - currentSpotPrice) / currentSpotPrice) * 100).toFixed(2)}%`}
+                        </span>
+                      </div>
+                    </div>
+                    <div className={`sl-pnl-box${activeSlProfit ? " profit" : ""}`}>
+                      <div className="sl-pnl-label">Approx P&amp;L at exit</div>
+                      <div className={`sl-pnl-value${activeSlProfit ? " profit" : ""}`}>{activeSlPnl == null ? "—" : fmtCurrency(activeSlPnl)}</div>
+                    </div>
+                    <div className="sl-panel-actions">
+                      <button className="sl-cancel-btn" onClick={() => setSlMode(false)}>
+                        Cancel
+                      </button>
+                      <button
+                        className="sl-save-btn"
+                        disabled={slMarkerPrice == null}
+                        onClick={() => {
+                          if (slMarkerPrice == null) return;
+                          const nextValue = { condition: slCondition, price: slMarkerPrice };
+                          if (slCondition === ">=") setSlSavedUpper(nextValue);
+                          else setSlSavedLower(nextValue);
+                          setSlMode(false);
+                        }}
+                      >
+                        Save
+                      </button>
+                    </div>
+                  </div>
                 </div>
+              )}
+
+              {spotVisible && (() => {
+                const pct = marginBasis ? ((payoffAtSpot / marginBasis) * 100).toFixed(3) : "0.000";
+                const sign = payoffAtSpot >= 0 ? "+" : "";
+                const label = floatingLoss ? "Projected loss" : "Projected profit";
+                const badgeWidth = 220;
+                return (
+                  <div
+                    className={`floating-pnl${floatingLoss ? " loss" : ""}`}
+                    style={{ left: (spotX || 0) - badgeWidth / 2, bottom: 36, top: "auto" }}
+                  >
+                    <span>{label}: {sign}{payoffAtSpot.toFixed(2)} ({sign}{pct}%)</span>
+                    <span style={{ opacity: 0.75 }}>ⓘ</span>
+                  </div>
+                );
+              })()}
+            </div>
+
+            {(slSavedUpper || slSavedLower) && (
+              <div className="sl-saved-bar">
+                <span>SL:</span>
+                {slSavedUpper && (
+                  <span>
+                    Above ≥ ₹{slSavedUpper.price.toLocaleString("en-IN")}{" "}
+                    <span>({fmtCurrency(calculatePnL(slSavedUpper.price))})</span>{" "}
+                    <button className="sl-remove-link" onClick={() => removeStoploss("upper")}>
+                      remove
+                    </button>
+                  </span>
+                )}
+                {slSavedUpper && slSavedLower && <span>|</span>}
+                {slSavedLower && (
+                  <span>
+                    Below ≤ ₹{slSavedLower.price.toLocaleString("en-IN")}{" "}
+                    <span>({fmtCurrency(calculatePnL(slSavedLower.price))})</span>{" "}
+                    <button className="sl-remove-link" onClick={() => removeStoploss("lower")}>
+                      remove
+                    </button>
+                  </span>
+                )}
+                <button className="sl-saved-edit" onClick={() => setSlMode(true)}>
+                  Edit
+                </button>
               </div>
             )}
-
-            {spotVisible && (() => {
-              const pct = marginBasis ? ((payoffAtSpot / marginBasis) * 100).toFixed(3) : "0.000";
-              const sign = payoffAtSpot >= 0 ? "+" : "";
-              const label = floatingLoss ? "Projected loss" : "Projected profit";
-              const badgeWidth = 220;
-              return (
-                <div
-                  className={`floating-pnl${floatingLoss ? " loss" : ""}`}
-                  style={{ left: (spotX || 0) - badgeWidth / 2, bottom: 36, top: "auto" }}
-                >
-                  <span>{label}: {sign}{payoffAtSpot.toFixed(2)} ({sign}{pct}%)</span>
-                  <span style={{ opacity: 0.75 }}>ⓘ</span>
-                </div>
-              );
-            })()}
           </div>
 
-{(slSavedUpper || slSavedLower) && (
-            <div className="sl-saved-bar">
-              <span>SL:</span>
-              {slSavedUpper && (
-                <span>
-                  Above ≥ ₹{slSavedUpper.price.toLocaleString("en-IN")}{" "}
-                  <span>({fmtCurrency(calculatePnL(slSavedUpper.price))})</span>{" "}
-                  <button className="sl-remove-link" onClick={() => removeStoploss("upper")}>
-                    remove
+          {leftTab === "OptionChain" && (<>
+            {/* ─────────── Position Table ─────────── */}
+            <div className="pos-section">
+
+              {/* Tab bar */}
+              <div className="pos-tabs">
+                {(["Positions", "Greeks", "TargetPnL", "Notes"] as const).map((tab) => (
+                  <button key={tab} type="button"
+                    className={`pos-tab${posActiveTab === tab ? " active" : ""}`}
+                    onClick={() => setPosActiveTab(tab)}
+                  >
+                    {tab === "TargetPnL" ? "Target P&L (blue line)" : tab}
                   </button>
-                </span>
-              )}
-              {slSavedUpper && slSavedLower && <span>|</span>}
-              {slSavedLower && (
-                <span>
-                  Below ≤ ₹{slSavedLower.price.toLocaleString("en-IN")}{" "}
-                  <span>({fmtCurrency(calculatePnL(slSavedLower.price))})</span>{" "}
-                  <button className="sl-remove-link" onClick={() => removeStoploss("lower")}>
-                    remove
-                  </button>
-                </span>
-              )}
-              <button className="sl-saved-edit" onClick={() => setSlMode(true)}>
-                Edit
-              </button>
-            </div>
-          )}
-          </div>
+                ))}
+                <div className="pos-tab-right">Add Notes&nbsp;&nbsp;|&nbsp;&nbsp;Add ons ▾</div>
+              </div>
 
-        {/* ─────────── Position Table ─────────── */}
-        <div className="pos-section">
-
-        {/* Tab bar */}
-        <div className="pos-tabs">
-          {(["Positions", "Greeks", "TargetPnL", "Notes"] as const).map((tab) => (
-            <button key={tab} type="button"
-              className={`pos-tab${posActiveTab === tab ? " active" : ""}`}
-              onClick={() => setPosActiveTab(tab)}
-            >
-              {tab === "TargetPnL" ? "Target P&L (blue line)" : tab}
-            </button>
-          ))}
-          <div className="pos-tab-right">Add Notes&nbsp;&nbsp;|&nbsp;&nbsp;Add ons ▾</div>
-        </div>
-
-        {posActiveTab === "Positions" && (
-          <div className="position_table">
-            <table style={{ width: "100%", minWidth: 700, tableLayout: "fixed" }}>
-              <colgroup>
-                <col style={{ width: 65 }} /><col style={{ width: 72 }} /><col style={{ width: "5%" }} />
-                <col style={{ width: 90 }} /><col style={{ width: 78 }} /><col style={{ width: 80 }} />
-                <col style={{ width: "8%" }} /><col style={{ width: "8%" }} /><col style={{ width: "6%" }} />
-                <col style={{ width: "13%" }} /><col style={{ width: 105 }} />
-              </colgroup>
-              <thead>
-                <tr className="sticky-top">
-                  <th className="action_head" style={{ padding: 0 }}>
-                    <div className="action_button_group" style={{ paddingLeft: 4 }}>
-                      <label className="checkbox-container-pt"><span className="checkbox-custom-pt checked" /></label>
-                      <span style={{ width: 18, display: "inline-block" }} />
-                    </div>
-                  </th>
-                  <th className="lotsize_head">Lots</th>
-                  <th>Qty</th>
-                  <th>Date &nbsp;↕</th>
-                  <th>Strike &nbsp;◇</th>
-                  <th>Expiry</th>
-                  <th>Entry</th>
-                  <th>LTP/Exit</th>
-                  <th>Delta</th>
-                  <th>P&amp;L</th>
-                  <th>Lots Exit &nbsp;◇</th>
-                </tr>
-              </thead>
-              <tbody>
-                {optionLegs.length === 0 ? (
-                  <tr><td colSpan={11} className="pos-empty">No positions — click B or S on the option chain to add.</td></tr>
-                ) : (
-                  optionLegs.map((leg, index) => {
-                    const ltp = getLegLTP(leg);
-                    const delta = getLegDelta(leg);
-                    const pnl = getLegPnl(leg);
-                    const pnlPct = leg.premium > 0 ? Math.abs(pnl / (leg.premium * leg.quantity)) * 100 : 0;
-                    const pnlCls = pnl >= 0 ? "simulator_green_text" : "simulator_red_text";
-                    const lots = leg.isQueued ? "-" : String(Math.max(1, Math.round(leg.quantity / LOT_SIZE)));
-                    const typeCode = leg.optionType === "Call" ? "CE" : "PE";
-                    const typeCls = leg.optionType === "Call" ? "call-btn-pt" : "put-btn-pt";
-                    const isIncluded = leg.includeInPnl !== false;
-                    const rowClass = leg.isQueued ? " queued__position" : (leg.exited ? (pnl >= 0 ? " exited__TP" : " exited__SL") : "");
-                    const rowOpacity = leg.exited ? 0.8 : 1;
-                    return (
-                      <tr key={`${index}-${leg.expiry}-${leg.strike}-${leg.type}`}
-                        className={`parent_position${rowClass}`}
-                        style={{ opacity: rowOpacity }}
-                      >
-                        {/* Checkbox + B/S */}
-                        <td style={{ padding: 0, paddingLeft: 4 }}>
-                          <div className="action_button_group">
-                            <label className="checkbox-container-pt" onClick={() => { if (!leg.isQueued) toggleInclude(index); }}>
-                              <span className={`checkbox-custom-pt${isIncluded ? " checked" : ""}`} style={leg.isQueued ? { opacity: 0.5 } : undefined} />
-                            </label>
-                            <div className={leg.type === "Buy" ? "pt-buy-btn" : "pt-sell-btn"}>
-                              {leg.type === "Buy" ? "B" : "S"}
-                            </div>
+              {posActiveTab === "Positions" && (
+                <div className="position_table">
+                  <table style={{ width: "100%", minWidth: 700, tableLayout: "fixed" }}>
+                    <colgroup>
+                      <col style={{ width: 65 }} /><col style={{ width: 72 }} /><col style={{ width: "5%" }} />
+                      <col style={{ width: 90 }} /><col style={{ width: 78 }} /><col style={{ width: 80 }} />
+                      <col style={{ width: "8%" }} /><col style={{ width: "8%" }} /><col style={{ width: "6%" }} />
+                      <col style={{ width: "13%" }} /><col style={{ width: 105 }} />
+                    </colgroup>
+                    <thead>
+                      <tr className="sticky-top">
+                        <th className="action_head" style={{ padding: 0 }}>
+                          <div className="action_button_group" style={{ paddingLeft: 4 }}>
+                            <label className="checkbox-container-pt"><span className="checkbox-custom-pt checked" /></label>
+                            <span style={{ width: 18, display: "inline-block" }} />
                           </div>
-                        </td>
-                        {/* Lots */}
-                        <td>
-                          {leg.isQueued ? (
-                            <div className="position__queue__dash">-</div>
-                          ) : (
-                            <div className="simulator_position_input position__strike">
-                              <button className="sign_btn" onClick={() => updateLots(index, Number(lots) - 1)}>−</button>
-                              <input type="number" className="sim-input lot-input" value={lots} min={1}
-                                onChange={(e) => updateLots(index, parseInt(e.target.value) || 1)} />
-                              <button className="sign_btn" onClick={() => updateLots(index, Number(lots) + 1)}>+</button>
-                            </div>
-                          )}
-                        </td>
-                        {/* Qty */}
-                        <td>{leg.isQueued ? "-" : leg.quantity}</td>
-                        {/* Date */}
-                        <td>
-                          <div style={{ display: "flex", flexDirection: "column" }}>
-                            <span>{leg.isQueued && <span className="queue-dot" />}{fmtEntryDate(leg.isQueued ? (leg.queuedAt || leg.entryDate) : leg.entryDate)}</span>
-                            {leg.exitDate && <span className="expiry_indicator">({fmtEntryDate(leg.exitDate)})</span>}
-                          </div>
-                        </td>
-                        {/* Strike */}
-                        <td>
-                          <div className="position__strike">
-                            <span>{leg.strike}</span>
-                            <span className={typeCls}>{typeCode}</span>
-                          </div>
-                        </td>
-                        {/* Expiry */}
-                        <td><div className="position__expiry">{fmtExpiry(leg.expiry)}</div></td>
-                        {/* Entry */}
-                        <td>
-                          {leg.isQueued ? (
-                            <div className="position__queue__dash">-</div>
-                          ) : (
-                            <input type="number" step="any" className="sim-input"
-                              defaultValue={leg.premium.toFixed(2)}
-                              onBlur={(e) => updateEntryPrice(index, parseFloat(e.target.value) || leg.premium)} />
-                          )}
-                        </td>
-                        {/* LTP/Exit */}
-                        <td>
-                          {leg.isQueued ? (
-                            <div className="position__queue__dash">-</div>
-                          ) : (
-                            <input type="number" step="any" className="sim-input" value={ltp.toFixed(2)} readOnly />
-                          )}
-                        </td>
-                        {/* Delta */}
-                        <td style={{ textAlign: "center" }}>{leg.isQueued ? "-" : (delta != null ? delta.toFixed(2) : "—")}</td>
-                        {/* P&L */}
-                        <td className={pnlCls}>
-                          {leg.isQueued ? (
-                            <div style={{ whiteSpace: "nowrap" }}>-</div>
-                          ) : (
-                            <div style={{ whiteSpace: "nowrap" }}>
-                              <span>{pnl < 0 ? "-" : ""}₹{Math.abs(pnl).toLocaleString("en-IN", { minimumFractionDigits: 2, maximumFractionDigits: 2 })}</span>
-                              <span className={`expiry_indicator ${pnlCls}`}> ({pnlPct.toFixed(0)}%)</span>
-                            </div>
-                          )}
-                        </td>
-                        {/* Lots Exit */}
-                        <td>
-                          {leg.isQueued ? (
-                            <div className="position__queue__dash">-</div>
-                          ) : (
-                            <div className="simulator_position_button">
-                              <select className="lot_select_space">
-                                {Array.from({ length: 20 }, (_, i) => i + 1).map((n) => (
-                                  <option key={n} value={n}>{n}</option>
-                                ))}
-                              </select>
-                              {leg.exited
-                                ? <button type="button" className="pos-exit-btn" title="Reopen" onClick={() => reopenLeg(index)}>↺</button>
-                                : <button type="button" className="pos-exit-btn" title="Exit" onClick={() => exitLeg(index)}>⊗</button>
-                              }
-                              <button type="button" className="pos-del-btn" title="Delete" onClick={() => removeLeg(index)}>🗑</button>
-                            </div>
-                          )}
-                        </td>
+                        </th>
+                        <th className="lotsize_head">Lots</th>
+                        <th>Qty</th>
+                        <th>Date &nbsp;↕</th>
+                        <th>Strike &nbsp;◇</th>
+                        <th>Expiry</th>
+                        <th>Entry</th>
+                        <th>LTP/Exit</th>
+                        <th>Delta</th>
+                        <th>P&amp;L</th>
+                        <th>Lots Exit &nbsp;◇</th>
                       </tr>
-                    );
-                  })
-                )}
-              </tbody>
-              <tfoot>
-                <tr className="table_footer">
-                  <th colSpan={8} style={{ textAlign: "left" }}>
-                    <div style={{ display: "flex", alignItems: "center", gap: 6, flexWrap: "wrap" }}>
-                      <span style={{ marginLeft: 4 }}>Multiplier:</span>
-                      <div className="simulator_group_input">
-                        <button type="button" className="sign_button" disabled={multiplier <= 1} onClick={() => setMultiplier((m) => Math.max(1, m - 1))}>−</button>
-                        <input className="mult_input" type="number" value={multiplier} min={1}
-                          onChange={(e) => setMultiplier(Math.max(1, parseInt(e.target.value) || 1))} />
-                        <button type="button" className="sign_button" onClick={() => setMultiplier((m) => m + 1)}>+</button>
-                      </div>
-                      <span style={{ color: "#6b7280", marginLeft: 4 }}>Lot Size: {LOT_SIZE}</span>
-                      <button type="button" className="btn-outline-xs" style={{ marginLeft: 4 }}>Add Alert</button>
-                      <button type="button" className="btn-outline-xs">Save</button>
-                      <button type="button" className="btn-outline-xs">Share</button>
-                    </div>
-                  </th>
-                  <th style={{ textAlign: "center", color: totalDelta >= 0 ? "#03B760" : "#EF6161" }}>
-                    {totalDelta.toFixed(2)}
-                  </th>
-                  <th className={totalPositionPnl >= 0 ? "simulator_green_text" : "simulator_red_text"}>
-                    {totalPositionPnl < 0 ? "-" : ""}₹{Math.abs(totalPositionPnl).toLocaleString("en-IN", { minimumFractionDigits: 2, maximumFractionDigits: 2 })}
-                  </th>
-                  <th>
-                    <div className="simulator_position_button">
-                      <a className="pos-exit-all" style={{ cursor: "pointer" }} onClick={() => setOptionLegs((prev) => prev.map((leg) => { const ltp2 = getLTP(leg.strike, leg.expiry, leg.optionType); const d2 = getLegDelta(leg); return { ...leg, exited: true, exitPrice: ltp2 ?? leg.premium, exitDelta: d2 }; }))}>Exit</a>
-                      <a className="pos-clear-all" style={{ cursor: "pointer" }} onClick={() => setOptionLegs([])}>Clear</a>
-                    </div>
-                  </th>
-                </tr>
-              </tfoot>
-            </table>
-          </div>
-        )}
+                    </thead>
+                    <tbody>
+                      {optionLegs.length === 0 ? (
+                        <tr><td colSpan={11} className="pos-empty">No positions — click B or S on the option chain to add.</td></tr>
+                      ) : (
+                        optionLegs.map((leg, index) => {
+                          const ltp = getLegLTP(leg);
+                          const delta = getLegDelta(leg);
+                          const pnl = getLegPnl(leg);
+                          const pnlPct = leg.premium > 0 ? Math.abs(pnl / (leg.premium * leg.quantity)) * 100 : 0;
+                          const pnlCls = pnl >= 0 ? "simulator_green_text" : "simulator_red_text";
+                          const lots = leg.isQueued ? "-" : String(Math.max(1, Math.round(leg.quantity / LOT_SIZE)));
+                          const typeCode = leg.optionType === "Call" ? "CE" : "PE";
+                          const typeCls = leg.optionType === "Call" ? "call-btn-pt" : "put-btn-pt";
+                          const isIncluded = leg.includeInPnl !== false;
+                          const rowClass = leg.isQueued ? " queued__position" : (leg.exited ? (pnl >= 0 ? " exited__TP" : " exited__SL") : "");
+                          const rowOpacity = leg.exited ? 0.8 : 1;
+                          return (
+                            <tr key={`${index}-${leg.expiry}-${leg.strike}-${leg.type}`}
+                              className={`parent_position${rowClass}`}
+                              style={{ opacity: rowOpacity }}
+                            >
+                              {/* Checkbox + B/S */}
+                              <td style={{ padding: 0, paddingLeft: 4 }}>
+                                <div className="action_button_group">
+                                  <label className="checkbox-container-pt" onClick={() => { if (!leg.isQueued) toggleInclude(index); }}>
+                                    <span className={`checkbox-custom-pt${isIncluded ? " checked" : ""}`} style={leg.isQueued ? { opacity: 0.5 } : undefined} />
+                                  </label>
+                                  <div className={leg.type === "Buy" ? "pt-buy-btn" : "pt-sell-btn"}>
+                                    {leg.type === "Buy" ? "B" : "S"}
+                                  </div>
+                                </div>
+                              </td>
+                              {/* Lots */}
+                              <td>
+                                {leg.isQueued ? (
+                                  <div className="position__queue__dash">-</div>
+                                ) : (
+                                  <div className="simulator_position_input position__strike">
+                                    <button className="sign_btn" onClick={() => updateLots(index, Number(lots) - 1)}>−</button>
+                                    <input type="number" className="sim-input lot-input" value={lots} min={1}
+                                      onChange={(e) => updateLots(index, parseInt(e.target.value) || 1)} />
+                                    <button className="sign_btn" onClick={() => updateLots(index, Number(lots) + 1)}>+</button>
+                                  </div>
+                                )}
+                              </td>
+                              {/* Qty */}
+                              <td>{leg.isQueued ? "-" : leg.quantity}</td>
+                              {/* Date */}
+                              <td>
+                                <div style={{ display: "flex", flexDirection: "column" }}>
+                                  <span>{leg.isQueued && <span className="queue-dot" />}{fmtEntryDate(leg.isQueued ? (leg.queuedAt || leg.entryDate) : leg.entryDate)}</span>
+                                  {leg.exitDate && <span className="expiry_indicator">({fmtEntryDate(leg.exitDate)})</span>}
+                                </div>
+                              </td>
+                              {/* Strike */}
+                              <td>
+                                <div className="position__strike">
+                                  <span>{leg.strike}</span>
+                                  <span className={typeCls}>{typeCode}</span>
+                                </div>
+                              </td>
+                              {/* Expiry */}
+                              <td><div className="position__expiry">{fmtExpiry(leg.expiry)}</div></td>
+                              {/* Entry */}
+                              <td>
+                                {leg.isQueued ? (
+                                  <div className="position__queue__dash">-</div>
+                                ) : (
+                                  <input type="number" step="any" className="sim-input"
+                                    defaultValue={leg.premium.toFixed(2)}
+                                    onBlur={(e) => updateEntryPrice(index, parseFloat(e.target.value) || leg.premium)} />
+                                )}
+                              </td>
+                              {/* LTP/Exit */}
+                              <td>
+                                {leg.isQueued ? (
+                                  <div className="position__queue__dash">-</div>
+                                ) : (
+                                  <input type="number" step="any" className="sim-input" value={ltp.toFixed(2)} readOnly />
+                                )}
+                              </td>
+                              {/* Delta */}
+                              <td style={{ textAlign: "center" }}>{leg.isQueued ? "-" : (delta != null ? delta.toFixed(2) : "—")}</td>
+                              {/* P&L */}
+                              <td className={pnlCls}>
+                                {leg.isQueued ? (
+                                  <div style={{ whiteSpace: "nowrap" }}>-</div>
+                                ) : (
+                                  <div style={{ whiteSpace: "nowrap" }}>
+                                    <span>{pnl < 0 ? "-" : ""}₹{Math.abs(pnl).toLocaleString("en-IN", { minimumFractionDigits: 2, maximumFractionDigits: 2 })}</span>
+                                    <span className={`expiry_indicator ${pnlCls}`}> ({pnlPct.toFixed(0)}%)</span>
+                                  </div>
+                                )}
+                              </td>
+                              {/* Lots Exit */}
+                              <td>
+                                {leg.isQueued ? (
+                                  <div className="position__queue__dash">-</div>
+                                ) : (
+                                  <div className="simulator_position_button">
+                                    <select className="lot_select_space">
+                                      {Array.from({ length: 20 }, (_, i) => i + 1).map((n) => (
+                                        <option key={n} value={n}>{n}</option>
+                                      ))}
+                                    </select>
+                                    {leg.exited
+                                      ? <button type="button" className="pos-exit-btn" title="Reopen" onClick={() => reopenLeg(index)}>↺</button>
+                                      : <button type="button" className="pos-exit-btn" title="Exit" onClick={() => exitLeg(index)}>⊗</button>
+                                    }
+                                    <button type="button" className="pos-del-btn" title="Delete" onClick={() => removeLeg(index)}>🗑</button>
+                                  </div>
+                                )}
+                              </td>
+                            </tr>
+                          );
+                        })
+                      )}
+                    </tbody>
+                    <tfoot>
+                      <tr className="table_footer">
+                        <th colSpan={8} style={{ textAlign: "left" }}>
+                          <div style={{ display: "flex", alignItems: "center", gap: 6, flexWrap: "wrap" }}>
+                            <span style={{ marginLeft: 4 }}>Multiplier:</span>
+                            <div className="simulator_group_input">
+                              <button type="button" className="sign_button" disabled={multiplier <= 1} onClick={() => setMultiplier((m) => Math.max(1, m - 1))}>−</button>
+                              <input className="mult_input" type="number" value={multiplier} min={1}
+                                onChange={(e) => setMultiplier(Math.max(1, parseInt(e.target.value) || 1))} />
+                              <button type="button" className="sign_button" onClick={() => setMultiplier((m) => m + 1)}>+</button>
+                            </div>
+                            <span style={{ color: "#6b7280", marginLeft: 4 }}>Lot Size: {LOT_SIZE}</span>
+                            <button type="button" className="btn-outline-xs" style={{ marginLeft: 4 }}>Add Alert</button>
+                            <button type="button" className="btn-outline-xs">Save</button>
+                            <button type="button" className="btn-outline-xs">Share</button>
+                          </div>
+                        </th>
+                        <th style={{ textAlign: "center", color: totalDelta >= 0 ? "#03B760" : "#EF6161" }}>
+                          {totalDelta.toFixed(2)}
+                        </th>
+                        <th className={totalPositionPnl >= 0 ? "simulator_green_text" : "simulator_red_text"}>
+                          {totalPositionPnl < 0 ? "-" : ""}₹{Math.abs(totalPositionPnl).toLocaleString("en-IN", { minimumFractionDigits: 2, maximumFractionDigits: 2 })}
+                        </th>
+                        <th>
+                          <div className="simulator_position_button">
+                            <a className="pos-exit-all" style={{ cursor: "pointer" }} onClick={() => setOptionLegs((prev) => prev.map((leg) => { const ltp2 = getLTP(leg.strike, leg.expiry, leg.optionType); const d2 = getLegDelta(leg); return { ...leg, exited: true, exitPrice: ltp2 ?? leg.premium, exitDelta: d2 }; }))}>Exit</a>
+                            <a className="pos-clear-all" style={{ cursor: "pointer" }} onClick={() => setOptionLegs([])}>Clear</a>
+                          </div>
+                        </th>
+                      </tr>
+                    </tfoot>
+                  </table>
+                </div>
+              )}
 
-        {posActiveTab !== "Positions" && (
-          <div style={{ padding: "24px", textAlign: "center", color: "#94a3b8", fontSize: 13 }}>
-            {posActiveTab === "Greeks" && "Greeks view coming soon…"}
-            {posActiveTab === "TargetPnL" && "Target P&L chart coming soon…"}
-            {posActiveTab === "Notes" && "Notes coming soon…"}
-          </div>
-        )}
+              {posActiveTab !== "Positions" && (
+                <div style={{ padding: "24px", textAlign: "center", color: "#94a3b8", fontSize: 13 }}>
+                  {posActiveTab === "Greeks" && "Greeks view coming soon…"}
+                  {posActiveTab === "TargetPnL" && "Target P&L chart coming soon…"}
+                  {posActiveTab === "Notes" && "Notes coming soon…"}
+                </div>
+              )}
+            </div>
+          </>)}
         </div>
       </div>
     </div>
-  </div>
   );
 }

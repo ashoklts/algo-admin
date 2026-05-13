@@ -12,11 +12,6 @@ const API_BASE = import.meta.env.VITE_API_BASE_URL as string;
 interface Notification {
   event_type?: string;
   type?: string;
-  feature?: string;
-  leg_id?: string;
-  status?: string;
-  trigger_price?: number;
-  current_sl_price?: number;
   timestamp?: string;
   created_at?: string;
   trigger_description?: string;
@@ -30,20 +25,7 @@ interface Notification {
   timestampText?: string;
 }
 
-interface FeatureRow {
-  feature?: string;
-  current_sl_price?: number;
-  current_tp_price?: number;
-  trigger_price?: number;
-  status?: string;
-}
-
 interface Leg {
-  id?: string;
-  _id?: string;
-  leg_id?: string;
-  feature_status_map?: { sl?: FeatureRow; target?: FeatureRow; trailSL?: FeatureRow };
-  feature_status_rows?: FeatureRow[];
   token?: string;
   trading_symbol?: string;
   symbol?: string;
@@ -71,15 +53,6 @@ interface Leg {
   mark_price?: number;
   status?: string;
   pnl?: number;
-  current_sl_price?: number;
-  display_sl_value?: number;
-  initial_sl_value?: number;
-  sl_price?: number;
-  current_tp_price?: number;
-  display_target_value?: number;
-  initial_target_value?: number;
-  target_price?: number;
-  momentum_target_price?: number;
   lots?: number;
   total_lots?: number;
   no_of_lots?: number;
@@ -146,7 +119,6 @@ interface TradePayload {
   broker_orders?: BrokerOrder[];
   notifications?: Notification[];
   notification_status?: Record<string, number>;
-  trade_notifications?: Notification[];
   view_type?: string;
   strategy_id?: string;
   group_id?: string;
@@ -455,18 +427,20 @@ function severityBadgeColor(severity: string): "info" | "warning" | "error" | "l
   return "info";
 }
 
-function NotificationStatusContent({ notifications, notificationStatus, strategies }: {
+function NotificationStatus({ notifications, notificationStatus, strategies }: {
   notifications: Notification[];
   notificationStatus: Record<string, number>;
   strategies?: StrategyItem[];
 }) {
   const showStratTabs = (strategies?.length ?? 0) > 1;
-  const [stratTab, setStratTab]   = useState(-1);
+  const [stratTab, setStratTab]   = useState(-1); // -1 = All
   const [filter, setFilter]       = useState<SeverityFilter>("all");
   const [search, setSearch]       = useState("");
 
+  // Reset filters when strategy tab changes
   const handleStratTab = (idx: number) => { setStratTab(idx); setFilter("all"); setSearch(""); };
 
+  // Pick correct notification source based on selected strategy tab
   const activeNotifs  = stratTab === -1 ? notifications : (strategies?.[stratTab]?.notifications ?? []);
   const activeStatus  = stratTab === -1 ? notificationStatus : (strategies?.[stratTab]?.notification_status ?? {});
 
@@ -493,9 +467,11 @@ function NotificationStatusContent({ notifications, notificationStatus, strategi
   ];
 
   return (
-    <>
-      {/* Header: search */}
-      <div className="flex flex-wrap items-center justify-end gap-3 px-6 py-4">
+    <div className="mt-8 rounded-2xl border border-gray-200 bg-white dark:border-gray-800 dark:bg-white/[0.03]">
+
+      {/* Card header: title + search */}
+      <div className="flex flex-wrap items-center justify-between gap-3 px-6 py-5">
+        <h3 className="text-base font-medium text-gray-800 dark:text-white/90">Notification Status</h3>
         <div className="relative w-full sm:w-64">
           <span className="pointer-events-none absolute inset-y-0 left-3 flex items-center text-gray-400">
             <svg xmlns="http://www.w3.org/2000/svg" fill="none" viewBox="0 0 24 24" strokeWidth={1.8} stroke="currentColor" className="h-4 w-4">
@@ -516,6 +492,7 @@ function NotificationStatusContent({ notifications, notificationStatus, strategi
       {showStratTabs && (
         <div className="border-t border-gray-100 dark:border-gray-800">
           <div className="flex flex-wrap items-center gap-5 px-6 sm:gap-7">
+            {/* All tab */}
             {[{ name: "All", count: notifications.length, idx: -1 }, ...(strategies ?? []).map((s, i) => ({
               name: s.trade?.name ?? `Strategy ${i + 1}`,
               count: s.notifications?.length ?? 0,
@@ -614,7 +591,7 @@ function NotificationStatusContent({ notifications, notificationStatus, strategi
           </Table>
         )}
       </div>
-    </>
+    </div>
   );
 }
 
@@ -684,37 +661,9 @@ function HeaderActionIcon() {
   );
 }
 
-function fmtFeaturePrice(val?: number | null) {
-  if (!val || val <= 0) return "-";
-  return "₹ " + Number(val).toFixed(2);
-}
-
-function normalizeFeatureKey(key?: string) {
-  return String(key ?? "").trim().toLowerCase().replace(/[_\s-]/g, "");
-}
-
-function buildLegFeatureMap(leg: Leg) {
-  const map: Record<string, FeatureRow> = {};
-  const src = leg.feature_status_map ?? {};
-
-  if (src.sl) map.sl = src.sl;
-  if (src.target) map.target = src.target;
-  if (src.trailSL) map.trailSL = src.trailSL;
-
-  for (const row of leg.feature_status_rows ?? []) {
-    const key = normalizeFeatureKey(row?.feature);
-    if (!key) continue;
-    if (key === "sl" || key === "stoploss") map.sl = map.sl ?? row;
-    if (key === "target" || key === "tg" || key === "tp") map.target = map.target ?? row;
-    if (key === "trailsl" || key === "trailstoploss") map.trailSL = map.trailSL ?? row;
-  }
-
-  return map;
-}
-
 function LegTable({ legs, title, isOpen, ltpMap }: { legs: Leg[]; title: string; isOpen?: boolean; ltpMap?: Record<string, number> }) {
   const headers = isOpen
-    ? ["Instrument", "Entry Type", "Qty", "Entry Price", "Entry Time", "LTP", "SL", "TG", "Trail SL", "Status", "MTM"]
+    ? ["Instrument", "Entry Type", "Qty", "Entry Price", "Entry Time", "LTP", "Status", "MTM"]
     : ["Instrument", "Entry Type", "Qty", "Entry Price", "Entry Time", "Exit Price", "Exit Time", "Status", "MTM"];
 
   return (
@@ -760,19 +709,6 @@ function LegTable({ legs, title, isOpen, ltpMap }: { legs: Leg[]; title: string;
                   : Number(leg.pnl ?? 0);
                 const base       = entryPx * qty;
                 const mtmPct     = base > 0 ? ((livePnl / base) * 100).toFixed(2) + "%" : "-";
-
-                const featureMap = buildLegFeatureMap(leg);
-                const slRow    = featureMap.sl;
-                const tgtRow   = featureMap.target;
-                const trailRow = featureMap.trailSL;
-                const slVal    = slRow
-                  ? (slRow.current_sl_price ?? slRow.trigger_price)
-                  : (leg.display_sl_value ?? leg.current_sl_price ?? leg.initial_sl_value ?? leg.sl_price);
-                const tgtVal   = tgtRow
-                  ? (tgtRow.current_tp_price ?? tgtRow.trigger_price)
-                  : (leg.display_target_value ?? leg.current_tp_price ?? leg.initial_target_value ?? leg.target_price);
-                const trailVal = trailRow ? (trailRow.current_sl_price ?? trailRow.trigger_price) : undefined;
-
                 return (
                   <TableRow key={i} className="hover:bg-gray-50 dark:hover:bg-white/[0.02]">
                     <TableCell className={isOpen ? "relative overflow-hidden px-0 py-0 text-start text-theme-sm text-[#667085]" : `${tdClass} font-semibold whitespace-nowrap`}>
@@ -792,20 +728,9 @@ function LegTable({ legs, title, isOpen, ltpMap }: { legs: Leg[]; title: string;
                     <TableCell className={tdClass}>{normPrice(leg, "entry")}</TableCell>
                     <TableCell className={`${tdClass} whitespace-nowrap`}>{normTime(leg, "entry")}</TableCell>
                     {isOpen ? (
-                      <>
-                        <TableCell className={`px-5 py-4 text-start text-theme-sm tabular-nums font-semibold ${ltpTextColor}`}>
-                          {ltpDisplay}
-                        </TableCell>
-                        <TableCell className="px-5 py-4 text-start text-theme-sm tabular-nums text-error-600 dark:text-error-400 whitespace-nowrap">
-                          {fmtFeaturePrice(slVal)}
-                        </TableCell>
-                        <TableCell className="px-5 py-4 text-start text-theme-sm tabular-nums text-success-600 dark:text-success-400 whitespace-nowrap">
-                          {fmtFeaturePrice(tgtVal)}
-                        </TableCell>
-                        <TableCell className="px-5 py-4 text-start text-theme-sm tabular-nums text-warning-600 dark:text-warning-400 whitespace-nowrap">
-                          {fmtFeaturePrice(trailVal)}
-                        </TableCell>
-                      </>
+                      <TableCell className={`px-5 py-4 text-start text-theme-sm tabular-nums font-semibold ${ltpTextColor}`}>
+                        {ltpDisplay}
+                      </TableCell>
                     ) : (
                       <>
                         <TableCell className={tdClass}>{normPrice(leg, "exit")}</TableCell>
@@ -1223,16 +1148,8 @@ export default function ExecutionView() {
   const closedLegs = payload?.legs?.closed ?? [];
   useEffect(() => { openLegsRef.current = openLegs; }, [openLegs]);
   const orders = payload?.broker_orders ?? [];
-  const [notifTab, setNotifTab] = useState<"details" | "entries">("details");
   const notifications = payload?.notifications ?? [];
   const notificationStatus = payload?.notification_status ?? {};
-
-  const tradeNotifications = payload?.trade_notifications ?? [];
-  const tradeNotifStatus = tradeNotifications.reduce((acc, n) => {
-    const et = String(n.event_type || n.type || "unknown").trim() || "unknown";
-    acc[et] = (acc[et] ?? 0) + 1;
-    return acc;
-  }, {} as Record<string, number>);
   const strategies: StrategyItem[] = payload?.strategies?.length
     ? payload.strategies
     : (payload?.execution_config_base || payload?.execution_config_extra)
@@ -1778,46 +1695,7 @@ export default function ExecutionView() {
               <LegTable legs={openLegs} title="Open Legs" isOpen ltpMap={ltpMap} />
               <LegTable legs={closedLegs} title="Closed Legs" />
               <OrderTable orders={orders} />
-
-              {/* Notification Section with Details / Entries tabs */}
-              <div className="mt-8 rounded-2xl border border-gray-200 bg-white dark:border-gray-800 dark:bg-white/[0.03]">
-                {/* Tab bar */}
-                <div className="flex items-center gap-6 px-6">
-                  {(["details", "entries"] as const).map(tab => {
-                    const active = notifTab === tab;
-                    const count = tab === "details" ? notifications.length : tradeNotifications.length;
-                    return (
-                      <button
-                        key={tab}
-                        type="button"
-                        onClick={() => setNotifTab(tab)}
-                        className={`relative inline-flex items-center gap-2 px-0 pb-4 pt-3 text-sm font-medium leading-none transition ${
-                          active
-                            ? "text-secondary-500 dark:text-secondary-400"
-                            : "text-gray-500 hover:text-gray-800 dark:text-gray-400 dark:hover:text-white/90"
-                        }`}
-                      >
-                        <span>{tab === "details" ? "Details View" : "Entries View"}</span>
-                        <span className={`inline-flex min-w-[22px] items-center justify-center rounded-full px-1.5 py-0 text-xs font-medium ${
-                          active
-                            ? "bg-secondary-50 text-secondary-500 dark:bg-secondary-500/10"
-                            : "bg-gray-100 text-gray-500 dark:bg-white/[0.03] dark:text-gray-400"
-                        }`}>{count}</span>
-                        <span className={`absolute bottom-0 left-0 h-0.5 w-full rounded-full transition ${active ? "bg-secondary-500" : "bg-transparent"}`} />
-                      </button>
-                    );
-                  })}
-                </div>
-
-                {/* Content */}
-                {notifTab === "details" && (
-                  <NotificationStatusContent notifications={notifications} notificationStatus={notificationStatus} strategies={payload?.strategies} />
-                )}
-                {notifTab === "entries" && (
-                  <NotificationStatusContent notifications={tradeNotifications} notificationStatus={tradeNotifStatus} />
-                )}
-              </div>
-
+              <NotificationStatus notifications={notifications} notificationStatus={notificationStatus} strategies={payload?.strategies} />
               <ExecutionSettings strategies={strategies} />
             </>
           )}

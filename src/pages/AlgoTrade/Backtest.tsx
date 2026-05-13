@@ -1014,7 +1014,7 @@ export default function AlgoBacktest() {
   const [bsModalOpen, setBsModalOpen] = useState(false);
   const [bsModal, setBsModal] = useState<BsModalState>(DEFAULT_MODAL);
   const [bsSaving, setBsSaving] = useState(false);
-  const [bsLoadingModal, setBsLoadingModal] = useState(false);
+  const [bsLoadingModal, _setBsLoadingModal] = useState(false);
   // mtm graph
   const [mtmGraphOpen, setMtmGraphOpen] = useState(false);
   const [mtmGraphData, setMtmGraphData] = useState<Record<string, MtmHistoricalEntry> | null>(null);

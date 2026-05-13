@@ -321,8 +321,9 @@ function CountdownOrMtm({ entryTime, pnl }: { entryTime?: string; pnl: number })
     const m = Math.floor((totalSecs % 3600) / 60).toString().padStart(2, "0");
     const s = (totalSecs % 60).toString().padStart(2, "0");
     return (
-      <div className="inline-flex w-fit justify-self-start items-center px-3 py-[6px] rounded border border-[#cfe0ff] bg-[#eef4ff] text-[#1580ed] text-[13px] font-semibold whitespace-nowrap tabular-nums">
-        Entry in {h}:{m}:{s}
+      <div className="flex flex-col items-start gap-0.5">
+        <div className="text-[11px] text-[#5b7086] font-medium">Entry in</div>
+        <div className="text-[14px] font-bold whitespace-nowrap tabular-nums text-[#d97706]">{h}:{m}:{s}</div>
       </div>
     );
   }

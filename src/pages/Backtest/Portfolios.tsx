@@ -1,4 +1,5 @@
 import { useEffect, useRef, useState } from "react";
+import { useNavigate } from "react-router";
 import PageMeta from "../../components/common/PageMeta";
 import { Modal } from "../../components/ui/modal";
 
@@ -82,6 +83,8 @@ function PortfolioCard({
   index: number;
   onDelete: (id: string) => void;
 }) {
+  const navigate = useNavigate();
+
   return (
     <div className="flex flex-col rounded-2xl border border-gray-200 bg-white dark:border-gray-800 dark:bg-white/[0.03]">
 
@@ -127,6 +130,7 @@ function PortfolioCard({
       <div className="mt-auto border-t border-gray-100 p-4">
         <button
           type="button"
+          onClick={() => navigate(`/backtest/portfolio/${portfolio._id}`)}
           className="flex w-full items-center justify-center gap-2 rounded-xl border border-gray-200 bg-white py-3 text-sm font-medium text-gray-700 transition hover:bg-gray-50 dark:border-gray-700 dark:bg-white/[0.03] dark:text-gray-300 dark:hover:bg-white/[0.05]"
         >
           View Portfolio
